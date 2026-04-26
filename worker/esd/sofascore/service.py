@@ -1,6 +1,6 @@
 #esd/sofascore/service.py
 """
-Sofascore service module - Patched for Stealth and Anti-Detection
+Sofascore service module - Patched for Stealth, Proxies, and Argument Compatibility
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-# Browser installation check for Cloud Environments (Railway/VPS)
+# Browser installation check for Cloud Environments
 def install_playwright_browsers():
     """Install Playwright browsers if missing"""
     logger = logging.getLogger(__name__)
@@ -83,14 +83,21 @@ class SofascoreService:
     A class to represent the SofaScore service with built-in stealth.
     """
 
-    def __init__(self, browser_path: str = None):
+    def __init__(self, browser_path: str = None, **kwargs):
         """
-        Initializes the SofaScore service.
+        Initializes the SofaScore service. 
+        **kwargs handles unexpected arguments like 'use_proxy' from the Client.
         """
+        # 1. Initialize Logger IMMEDIATELY to prevent cleanup errors
         self.logger = logging.getLogger(__name__)
+        
         self.browser_path = browser_path
         self.endpoints = SofascoreEndpoints()
         self.playwright = self.browser = self.page = self.context = None
+        
+        # Check if client passed use_proxy even if we handle it via Env Vars
+        self.use_proxy_requested = kwargs.get('use_proxy', True)
+        
         self.__init_playwright()
 
     def __init_playwright(self):
@@ -104,8 +111,6 @@ class SofascoreService:
                 self.playwright = playwright.sync_api.sync_playwright().start()
                 
                 # --- PROXY CONFIGURATION ---
-                # It is highly recommended to use environment variables for these.
-                # Example: PROXY_SERVER="http://proxy.example.com:8080"
                 proxy_server = os.getenv("PROXY_SERVER")
                 proxy_user = os.getenv("PROXY_USER")
                 proxy_pass = os.getenv("PROXY_PASS")
@@ -116,6 +121,7 @@ class SofascoreService:
                     if proxy_user and proxy_pass:
                         proxy_cfg["username"] = proxy_user
                         proxy_cfg["password"] = proxy_pass
+                    self.logger.info(f"Proxy detected: {proxy_server}")
 
                 launch_options = {
                     'headless': True,
@@ -125,7 +131,6 @@ class SofascoreService:
                         '--disable-dev-shm-usage',
                         '--disable-blink-features=AutomationControlled',
                         '--disable-infobars',
-                        '--disable-web-security',
                     ],
                     'timeout': 60000
                 }
@@ -135,7 +140,6 @@ class SofascoreService:
                 
                 self.browser = self.playwright.chromium.launch(**launch_options)
                 
-                # Create a realistic browser context
                 self.context = self.browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                     viewport={'width': 1920, 'height': 1080},
@@ -145,29 +149,25 @@ class SofascoreService:
                 self.page = self.context.new_page()
                 self.page.set_default_timeout(45000)
                 
-                # Apply Stealth to hide Playwright fingerprint
+                # Use 'stealth' (not stealth_sync)
                 stealth(self.page)
                 
-                # --- SESSION PRIMING ---
-                # Sofascore blocks direct API calls without proper cookies/headers.
-                # Visiting the homepage first mimics a real user session.
-                self.logger.info("Navigating to Sofascore to establish session...")
+                # establish session
+                self.logger.info("Priming Sofascore session...")
                 self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=60000)
-                time.sleep(2) # Small delay to allow cookies to set
+                time.sleep(2) 
                 
-                self.logger.info("Playwright initialized successfully with Stealth.")
+                self.logger.info("Playwright initialized successfully.")
                 return
                 
             except Exception as exc:
                 self.logger.error(f"Playwright initialization failed: {str(exc)}")
                 self.close()
                 if attempt == max_retries - 1:
-                    raise RuntimeError("Failed to bypass Sofascore blocks after retries.") from exc
+                    raise RuntimeError("Failed to bypass Sofascore blocks.") from exc
 
     def close(self):
-        """
-        Close all Playwright resources.
-        """
+        """Close all Playwright resources."""
         try:
             if self.page:
                 self.page.close()
@@ -178,9 +178,10 @@ class SofascoreService:
             if self.playwright:
                 self.playwright.stop()
             self.page = self.context = self.browser = self.playwright = None
-            self.logger.info("Playwright resources closed successfully")
         except Exception as exc:
-            self.logger.error(f"Error during cleanup: {str(exc)}")
+            # Check if self.logger exists before using it
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Error during cleanup: {str(exc)}")
 
     def __del__(self):
         self.close()
@@ -288,8 +289,8 @@ class SofascoreService:
         try:
             url = self.endpoints.search_endpoint(query=query, entity_type=entity.value)
             results = get_json(self.page, url).get("results", [])
-            # Logic for parsing based on EntityType can be added here
             return results
         except Exception as exc:
             self.logger.error(f"Search failed for '{query}': {str(exc)}")
             return []
+
