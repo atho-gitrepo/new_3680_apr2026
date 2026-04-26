@@ -6,6 +6,7 @@ google-cloud-firestore
 firebase-admin
 esd
 playwright
+playwright-stealth
 firebase-admin
 httpx
 lxml
