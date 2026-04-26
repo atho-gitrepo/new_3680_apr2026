@@ -146,7 +146,7 @@ class SofascoreService:
                 self.page.set_default_timeout(45000)
                 
                 # Apply Stealth to hide Playwright fingerprint
-                stealth_sync(self.page)
+                stealth(self.page)
                 
                 # --- SESSION PRIMING ---
                 # Sofascore blocks direct API calls without proper cookies/headers.
