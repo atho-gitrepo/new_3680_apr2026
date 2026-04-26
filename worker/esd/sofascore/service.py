@@ -5,7 +5,7 @@ Sofascore service module - Patched for Stealth and Anti-Detection
 
 from __future__ import annotations
 import playwright.sync_api
-from playwright_stealth import stealth_sync
+from playwright_stealth import stealth
 import os
 import logging
 import subprocess
