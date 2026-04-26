@@ -1,6 +1,5 @@
 """
-Sofascore service module - Production Grade
-Fixes: Playwright module call, Stealth import, and Client Compatibility
+Sofascore service module - Production Grade (Fixed Module Call)
 """
 
 from __future__ import annotations
@@ -10,8 +9,8 @@ import subprocess
 import sys
 import time
 
-# --- PLAYWRIGHT IMPORTS ---
-from playwright.sync_api import sync_playwright
+# Pre-loading required libraries
+import playwright.sync_api
 from playwright_stealth import stealth
 
 # Browser installation check for Cloud Environments (Railway)
@@ -59,30 +58,30 @@ class SofascoreService:
     def __init__(self, browser_path: str = None, **kwargs):
         """
         Initializes the SofaScore service.
-        **kwargs catches 'use_proxy' from SofascoreClient to prevent TypeError.
+        **kwargs ensures compatibility with client calls using 'use_proxy'.
         """
-        # Initialize logger FIRST to avoid AttributeError during cleanup
+        # Initialize logger FIRST to prevent AttributeError in cleanup
         self.logger = logging.getLogger(__name__)
         
         self.browser_path = browser_path
         self.endpoints = SofascoreEndpoints()
         self.playwright = self.browser = self.page = self.context = None
         
-        # Store kwargs if needed for debugging
-        self.init_args = kwargs
-        
         self.__init_playwright()
 
     def __init_playwright(self):
         """
-        Initialize Playwright with stealth settings and session priming.
+        Initialize Playwright with forced function-call logic.
         """
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 self.logger.info(f"Initializing Playwright (attempt {attempt + 1})")
                 
-                # Start Playwright correctly as a function call
+                # --- THE CRITICAL FIX: FORCED NAMESPACE ---
+                # We import the module and the function separately to avoid 
+                # the 'module is not callable' error.
+                from playwright.sync_api import sync_playwright
                 self.playwright = sync_playwright().start()
                 
                 # --- PROXY CONFIGURATION ---
@@ -92,7 +91,6 @@ class SofascoreService:
 
                 proxy_cfg = None
                 if proxy_server:
-                    # Strip protocol for clean handling
                     clean_url = proxy_server.replace("http://", "").replace("https://", "")
                     proxy_cfg = {"server": f"http://{clean_url}"}
                     if proxy_user and proxy_pass:
@@ -117,11 +115,9 @@ class SofascoreService:
                 
                 self.browser = self.playwright.chromium.launch(**launch_options)
                 
-                # Create a realistic context
                 self.context = self.browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080},
-                    locale='en-US'
+                    viewport={'width': 1920, 'height': 1080}
                 )
                 
                 self.page = self.context.new_page()
@@ -130,7 +126,7 @@ class SofascoreService:
                 # Apply Stealth
                 stealth(self.page)
                 
-                # Priming the session is CRITICAL to bypass Cloudflare/Akamai
+                # Session Priming
                 self.logger.info("Priming Sofascore session...")
                 self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=60000)
                 time.sleep(2) 
@@ -142,7 +138,7 @@ class SofascoreService:
                 self.logger.error(f"❌ Playwright failed: {str(exc)}")
                 self.close()
                 if attempt == max_retries - 1:
-                    raise RuntimeError("Failed to bypass Sofascore blocks after 3 attempts.") from exc
+                    raise RuntimeError(f"Initialization fatal error: {str(exc)}") from exc
 
     def close(self):
         """Clean up Playwright resources."""
@@ -156,7 +152,6 @@ class SofascoreService:
             if self.playwright:
                 self.playwright.stop()
         except Exception as exc:
-            # Check if logger exists to prevent the AttributeError loop
             if hasattr(self, 'logger'):
                 self.logger.error(f"Cleanup error: {str(exc)}")
         finally:
@@ -164,8 +159,6 @@ class SofascoreService:
 
     def __del__(self):
         self.close()
-
-    # --- API Methods ---
 
     def get_live_events(self) -> list[Event]:
         try:
