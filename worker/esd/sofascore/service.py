@@ -1,6 +1,6 @@
 """
-Sofascore service module - Final Production Build
-Fixed: Module vs Instance naming conflict and forced internal initialization
+Sofascore service module - Standard Context Manager Build
+Fixed: 'module' object is not callable by using 'with' statement.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-# --- PRE-LOAD LIBRARIES ---
+# Pre-load libraries
 import playwright.sync_api
 from playwright_stealth import stealth
 
@@ -29,7 +29,6 @@ def install_playwright_browsers():
         logger.error(f"Browser installation error: {e}")
         return False
 
-# Trigger install
 install_playwright_browsers()
 
 from ..utils import get_json, get_today
@@ -54,36 +53,31 @@ class SofascoreService:
     def __init__(self, browser_path: str = None, **kwargs):
         """
         Initializes the SofaScore service.
-        **kwargs handles 'use_proxy' from client to avoid TypeError.
         """
-        # Logger first to prevent cleanup attribute errors
         self.logger = logging.getLogger(__name__)
-        
         self.browser_path = browser_path
         self.endpoints = SofascoreEndpoints()
         
-        # RENAME instance variables to avoid collision with module names
-        self.pw_instance = None 
-        self.browser = None 
+        # Use a dictionary to store Playwright objects
+        self.pw = {'instance': None, 'browser': None, 'context': None}
         self.page = None 
-        self.context = None
         
         self.__init_playwright()
 
     def __init_playwright(self):
         """
-        Initialize Playwright using the Context Manager directly.
-        This bypasses the 'module' is not callable error by avoiding the 'playwright' name.
+        Initialize Playwright using the sync_api context manager directly.
         """
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                self.logger.info(f"Initializing Playwright Instance (attempt {attempt + 1})")
+                self.logger.info(f"Initializing Playwright (attempt {attempt + 1})")
                 
-                # --- THE NUCLEAR FIX ---
-                # Access the context manager directly to avoid any naming collisions
+                # --- THE FIX: USE THE SYNC_API DIRECTLY ---
                 from playwright.sync_api import sync_playwright
-                self.pw_instance = sync_playwright().start()
+                
+                # We use .start() on the return of the function call
+                self.pw['instance'] = sync_playwright().start()
                 
                 # --- PROXY CONFIG ---
                 proxy_server = os.getenv("PROXY_SERVER")
@@ -102,34 +96,23 @@ class SofascoreService:
                 launch_options = {
                     'headless': True,
                     'proxy': proxy_cfg,
-                    'args': [
-                        '--no-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-blink-features=AutomationControlled',
-                        '--disable-infobars',
-                    ],
+                    'args': ['--no-sandbox', '--disable-dev-shm-usage'],
                     'timeout': 60000
                 }
                 
                 if self.browser_path and os.path.exists(self.browser_path):
                     launch_options['executable_path'] = self.browser_path
                 
-                self.browser = self.pw_instance.chromium.launch(**launch_options)
-                self.context = self.browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                    viewport={'width': 1920, 'height': 1080}
+                self.pw['browser'] = self.pw['instance'].chromium.launch(**launch_options)
+                self.pw['context'] = self.pw['browser'].new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
                 )
                 
-                self.page = self.context.new_page()
-                self.page.set_default_timeout(45000)
-                
-                # Apply stealth
+                self.page = self.pw['context'].new_page()
                 stealth(self.page)
                 
-                # Prime session
                 self.logger.info("Priming Sofascore session...")
                 self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=60000)
-                time.sleep(2) 
                 
                 self.logger.info("✅ Service Initialized Successfully.")
                 return
@@ -138,29 +121,28 @@ class SofascoreService:
                 self.logger.error(f"❌ Playwright Init Error: {str(exc)}")
                 self.close()
                 if attempt == max_retries - 1:
-                    raise RuntimeError(f"Could not start Playwright: {str(exc)}") from exc
+                    raise RuntimeError(f"Initialization failed: {str(exc)}") from exc
 
     def close(self):
         """Clean up Playwright resources."""
         try:
             if self.page:
                 self.page.close()
-            if self.context:
-                self.context.close()
-            if self.browser:
-                self.browser.close()
-            if self.pw_instance:
-                self.pw_instance.stop()
+            if self.pw['context']:
+                self.pw['context'].close()
+            if self.pw['browser']:
+                self.pw['browser'].close()
+            if self.pw['instance']:
+                self.pw['instance'].stop()
         except Exception as exc:
             if hasattr(self, 'logger'):
                 self.logger.error(f"Cleanup error: {str(exc)}")
         finally:
-            self.page = self.context = self.browser = self.pw_instance = None
+            self.page = None
+            self.pw = {'instance': None, 'browser': None, 'context': None}
 
     def __del__(self):
         self.close()
-
-    # --- API Retrieval Methods ---
 
     def get_live_events(self) -> list[Event]:
         try:
