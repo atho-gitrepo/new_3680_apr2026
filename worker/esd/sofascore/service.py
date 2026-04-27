@@ -1,5 +1,5 @@
 """
-Sofascore service module - FIXED + Production Ready (Stealth + Anti-Detection)
+Sofascore service module - STABLE VERSION (Anti-Block + Version Safe)
 """
 
 from __future__ import annotations
@@ -8,12 +8,23 @@ import logging
 import subprocess
 import sys
 import time
+import random
 
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync  # ✅ FIXED
+
+# ✅ VERSION-SAFE STEALTH IMPORT
+try:
+    from playwright_stealth import stealth_sync as apply_stealth
+except ImportError:
+    from playwright_stealth import stealth as apply_stealth
+
+from ..utils import get_json, get_today
+from .endpoints import SofascoreEndpoints
+from .types import *
+
 
 # -------------------------------
-# OPTIONAL: Install browsers (safe guard)
+# OPTIONAL: Install browsers
 # -------------------------------
 def install_playwright_browsers():
     logger = logging.getLogger(__name__)
@@ -25,38 +36,22 @@ def install_playwright_browsers():
             text=True,
             timeout=300
         )
-
-        if result.returncode == 0:
-            logger.info("Playwright browsers verified/installed successfully")
-            return True
-        else:
-            logger.error(f"Browser install failed: {result.stderr}")
-            return False
-
+        return result.returncode == 0
     except Exception as e:
-        logger.error(f"Browser installation error: {e}")
+        logger.error(f"Browser install error: {e}")
         return False
 
 
-# ⚠️ Disable in production if already installed
+# Disable in production unless needed
 if os.getenv("ENABLE_BROWSER_INSTALL", "false").lower() == "true":
     install_playwright_browsers()
 
 
-from ..utils import get_json, get_today
-from .endpoints import SofascoreEndpoints
-from .types import *
-
 class SofascoreService:
-    """
-    SofaScore service with stealth + retry-safe Playwright
-    """
-
     def __init__(self, browser_path: str = None, use_proxy: bool = False):
         self.logger = logging.getLogger(__name__)
         self.browser_path = browser_path
         self.use_proxy_enabled = use_proxy
-
         self.endpoints = SofascoreEndpoints()
 
         self.playwright = None
@@ -67,7 +62,7 @@ class SofascoreService:
         self.__init_playwright()
 
     # -------------------------------
-    # 🔥 PLAYWRIGHT INIT (FIXED)
+    # 🔥 INIT PLAYWRIGHT (ANTI-BLOCK)
     # -------------------------------
     def __init_playwright(self):
         max_retries = 3
@@ -76,7 +71,6 @@ class SofascoreService:
             try:
                 self.logger.info(f"Initializing Playwright (attempt {attempt+1})")
 
-                # ✅ SAFE INIT
                 self.playwright = sync_playwright().start()
 
                 # -------------------------------
@@ -94,40 +88,42 @@ class SofascoreService:
                         proxy_cfg["password"] = proxy_pass
 
                 # -------------------------------
-                # BROWSER LAUNCH
+                # LAUNCH BROWSER
                 # -------------------------------
-                launch_options = {
-                    "headless": True,
-                    "proxy": proxy_cfg,
-                    "args": [
+                self.browser = self.playwright.chromium.launch(
+                    headless=True,
+                    proxy=proxy_cfg,
+                    args=[
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-blink-features=AutomationControlled",
-                        "--disable-infobars",
-                        "--disable-web-security",
                     ],
-                    "timeout": 60000,
-                }
-
-                if self.browser_path and os.path.exists(self.browser_path):
-                    launch_options["executable_path"] = self.browser_path
-
-                self.browser = self.playwright.chromium.launch(**launch_options)
+                    timeout=60000,
+                )
 
                 # -------------------------------
-                # CONTEXT
+                # CONTEXT (REALISTIC SETTINGS)
                 # -------------------------------
                 self.context = self.browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
                     viewport={"width": 1920, "height": 1080},
                     locale="en-US",
+                    timezone_id="Asia/Bangkok",
                 )
 
                 self.page = self.context.new_page()
                 self.page.set_default_timeout(45000)
 
                 # -------------------------------
-                # 🚀 PERFORMANCE BOOST
+                # HEADERS (ANTI-BOT)
+                # -------------------------------
+                self.page.set_extra_http_headers({
+                    "accept-language": "en-US,en;q=0.9",
+                    "referer": "https://www.google.com/",
+                })
+
+                # -------------------------------
+                # PERFORMANCE BOOST
                 # -------------------------------
                 self.page.route(
                     "**/*",
@@ -137,21 +133,21 @@ class SofascoreService:
                 )
 
                 # -------------------------------
-                # 🕵️ STEALTH FIX
+                # STEALTH APPLY
                 # -------------------------------
-                stealth_sync(self.page)  # ✅ FIXED
+                apply_stealth(self.page)
 
                 # -------------------------------
-                # SESSION PRIME
+                # HUMAN-LIKE SESSION INIT
                 # -------------------------------
-                self.logger.info("Opening Sofascore...")
-                self.page.goto(
-                    "https://www.sofascore.com",
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
+                self.logger.info("Opening Sofascore homepage...")
+                self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded")
 
-                time.sleep(2)
+                time.sleep(random.uniform(2, 4))
+
+                # simulate human movement
+                self.page.mouse.move(100, 200)
+                self.page.mouse.move(300, 400)
 
                 self.logger.info("✅ Playwright initialized successfully")
                 return
@@ -161,9 +157,27 @@ class SofascoreService:
                 self.close()
 
                 if attempt == max_retries - 1:
-                    raise RuntimeError(
-                        "Failed to initialize Playwright after retries"
-                    ) from exc
+                    raise RuntimeError("Failed to initialize Playwright") from exc
+
+    # -------------------------------
+    # 🔥 SAFE REQUEST (ANTI-BLOCK)
+    # -------------------------------
+    def safe_get_json(self, url):
+        for attempt in range(3):
+            try:
+                time.sleep(random.uniform(1, 2))  # slow down requests
+                return get_json(self.page, url)
+
+            except Exception as e:
+                self.logger.warning(f"Retry {attempt+1} due to block: {e}")
+
+                try:
+                    self.page.goto("https://www.sofascore.com")
+                    time.sleep(2)
+                except:
+                    pass
+
+        raise Exception("Blocked by Sofascore")
 
     # -------------------------------
     # CLEANUP
@@ -187,29 +201,33 @@ class SofascoreService:
             self.logger.info("Playwright resources closed")
 
         except Exception as exc:
-            self.logger.error(f"Cleanup error: {str(exc)}")
+            self.logger.error(f"Cleanup error: {exc}")
 
     def __del__(self):
         self.close()
 
     # -------------------------------
-    # API METHODS
+    # API METHODS (SAFE)
     # -------------------------------
     def get_event(self, event_id: int):
         url = self.endpoints.event_endpoint(event_id)
-        return parse_event(get_json(self.page, url)["event"])
+        return parse_event(self.safe_get_json(url)["event"])
 
     def get_events(self, date: str = "today"):
         if date == "today":
             date = get_today()
         url = self.endpoints.events_endpoint.format(date=date)
-        return parse_events(get_json(self.page, url)["events"])
+        return parse_events(self.safe_get_json(url)["events"])
 
     def get_live_events(self):
         url = self.endpoints.live_events_endpoint
-        return parse_events(get_json(self.page, url).get("events", []))
+        return parse_events(self.safe_get_json(url).get("events", []))
 
     def get_match_stats(self, event_id: int):
-        stats = get_json(self.page, self.endpoints.match_stats_endpoint(event_id))
-        prob = get_json(self.page, self.endpoints.match_probabilities_endpoint(event_id))
-        return parse_match_stats(stats.get("statistics", {}), prob.get("winProbability", {}))
+        stats = self.safe_get_json(self.endpoints.match_stats_endpoint(event_id))
+        prob = self.safe_get_json(self.endpoints.match_probabilities_endpoint(event_id))
+
+        return parse_match_stats(
+            stats.get("statistics", {}),
+            prob.get("winProbability", {})
+        )
