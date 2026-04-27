@@ -1,5 +1,5 @@
 """
-Sofascore service module - FINAL FIXED VERSION
+Sofascore service module - FINAL STABLE VERSION
 """
 
 from __future__ import annotations
@@ -10,11 +10,13 @@ import random
 
 from playwright.sync_api import sync_playwright
 
-# ✅ Version-safe stealth
+# ✅ SAFE STEALTH IMPORT (handles all versions)
 try:
-    from playwright_stealth import stealth_sync as apply_stealth
+    from playwright_stealth.stealth import stealth_sync
+    STEALTH_MODE = "sync"
 except ImportError:
-    from playwright_stealth import stealth as apply_stealth
+    from playwright_stealth import stealth
+    STEALTH_MODE = "legacy"
 
 from ..utils import get_json, get_today
 from .endpoints import SofascoreEndpoints
@@ -22,9 +24,8 @@ from .types import *
 
 
 class SofascoreService:
-
     def __init__(self, browser_path: str = None, use_proxy: str = None, headless: bool = True):
-        # ✅ ALWAYS define logger FIRST (fix crash)
+        # ✅ Always define logger first
         self.logger = logging.getLogger(__name__)
 
         self.browser_path = browser_path
@@ -38,7 +39,7 @@ class SofascoreService:
         self.context = None
         self.page = None
 
-        # ✅ init browser
+        # Init browser
         self.__init_playwright()
 
     # -------------------------------
@@ -53,12 +54,10 @@ class SofascoreService:
 
                 self.playwright = sync_playwright().start()
 
-                # Proxy
                 proxy_cfg = None
                 if self.use_proxy:
                     proxy_cfg = {"server": self.use_proxy}
 
-                # Launch browser
                 self.browser = self.playwright.chromium.launch(
                     headless=self.headless,
                     proxy=proxy_cfg,
@@ -69,7 +68,6 @@ class SofascoreService:
                     ],
                 )
 
-                # Context
                 self.context = self.browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
                     viewport={"width": 1920, "height": 1080},
@@ -94,17 +92,21 @@ class SofascoreService:
                     else route.continue_(),
                 )
 
-                # Stealth
-                apply_stealth(self.page)
+                # ✅ APPLY STEALTH SAFELY
+                if STEALTH_MODE == "sync":
+                    stealth_sync(self.page)
+                else:
+                    stealth(self.page)
 
-                # Open site
+                # Warm session
                 self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded")
 
+                # Human-like behavior
                 time.sleep(random.uniform(2, 4))
                 self.page.mouse.move(100, 200)
                 self.page.mouse.move(300, 400)
 
-                self.logger.info("✅ Playwright initialized")
+                self.logger.info("✅ Playwright initialized successfully")
                 return
 
             except Exception as e:
@@ -115,7 +117,7 @@ class SofascoreService:
                     raise RuntimeError("Playwright init failed")
 
     # -------------------------------
-    # SAFE REQUEST
+    # SAFE REQUEST (ANTI-BLOCK)
     # -------------------------------
     def safe_get_json(self, url):
         for attempt in range(3):
@@ -124,6 +126,7 @@ class SofascoreService:
                 return get_json(self.page, url)
             except Exception as e:
                 self.logger.warning(f"Retry {attempt+1}: {e}")
+
                 try:
                     self.page.goto("https://www.sofascore.com")
                     time.sleep(2)
@@ -133,7 +136,7 @@ class SofascoreService:
         raise Exception("Blocked by Sofascore")
 
     # -------------------------------
-    # CLEANUP (SAFE)
+    # CLEANUP
     # -------------------------------
     def close(self):
         try:
@@ -146,7 +149,6 @@ class SofascoreService:
             if self.playwright:
                 self.playwright.stop()
         except Exception as e:
-            # ✅ no crash if logger missing
             if hasattr(self, "logger"):
                 self.logger.error(f"Cleanup error: {e}")
 
