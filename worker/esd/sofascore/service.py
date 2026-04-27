@@ -3,13 +3,15 @@ Sofascore service module - Patched for Stealth and Anti-Detection
 """
 
 from __future__ import annotations
-import playwright.sync_api
-from playwright_stealth import stealth
 import os
 import logging
 import subprocess
 import sys
 import time
+
+# FIXED IMPORT: Use the direct sync_playwright helper
+from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth
 
 # Browser installation check for Cloud Environments (Railway/VPS)
 def install_playwright_browsers():
@@ -85,11 +87,10 @@ class SofascoreService:
     def __init__(self, browser_path: str = None, use_proxy: bool = False, **kwargs):
         """
         Initializes the SofaScore service.
-        Added use_proxy and **kwargs to prevent initialization errors.
         """
         self.logger = logging.getLogger(__name__)
         self.browser_path = browser_path
-        self.use_proxy_enabled = use_proxy # Internal flag if needed
+        self.use_proxy_enabled = use_proxy
         self.endpoints = SofascoreEndpoints()
         self.playwright = self.browser = self.page = self.context = None
         self.__init_playwright()
@@ -102,7 +103,9 @@ class SofascoreService:
         for attempt in range(max_retries):
             try:
                 self.logger.info(f"Initializing Playwright with Stealth (attempt {attempt + 1})")
-                self.playwright = playwright.sync_api.sync_playwright().start()
+                
+                # FIXED: Call the function directly from the import
+                self.playwright = sync_playwright().start()
                 
                 # --- PROXY CONFIGURATION ---
                 proxy_server = os.getenv("PROXY_SERVER")
@@ -143,6 +146,7 @@ class SofascoreService:
                 self.page = self.context.new_page()
                 self.page.set_default_timeout(45000)
                 
+                # Apply Stealth
                 stealth(self.page)
                 
                 self.logger.info("Navigating to Sofascore to establish session...")
@@ -175,15 +179,11 @@ class SofascoreService:
             
             self.page = self.context = self.browser = self.playwright = None
             
-            # Safe check for logger attribute
             if hasattr(self, 'logger') and self.logger:
                 self.logger.info("Playwright resources closed successfully")
         except Exception as exc:
-            # Fallback if logger is not initialized
             if hasattr(self, 'logger') and self.logger:
                 self.logger.error(f"Error during cleanup: {str(exc)}")
-            else:
-                print(f"Error during cleanup (logger unavailable): {exc}")
 
     def __del__(self):
         self.close()
@@ -295,4 +295,3 @@ class SofascoreService:
         except Exception as exc:
             self.logger.error(f"Search failed for '{query}': {str(exc)}")
             return []
-
