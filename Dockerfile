@@ -1,19 +1,21 @@
 # ----------------------------------------------------
-# 1. BASE IMAGE: **FIXED** to use the active 'bullseye' release
+# 1. BASE IMAGE
 # ----------------------------------------------------
 FROM python:3.11-slim-bullseye 
 
 # ----------------------------------------------------
-# 2. ENVIRONMENT SETUP
+# 2. WORKDIR
 # ----------------------------------------------------
 WORKDIR /app
 
 # ----------------------------------------------------
-# 3. FIX: INSTALL SYSTEM DEPENDENCIES FOR PLAYWRIGHT
-# This is the step that failed, but it will now succeed with the new base image.
+# 3. SYSTEM DEPENDENCIES (Playwright)
 # ----------------------------------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        wget \
+        curl \
+        ca-certificates \
         libglib2.0-0 \
         libnspr4 \
         libnss3 \
@@ -30,9 +32,12 @@ RUN apt-get update && \
         libgbm1 \
         libxcb1 \
         libxkbcommon0 \
-        libasound2 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+        libasound2 \
+        libpangocairo-1.0-0 \
+        libgtk-3-0 \
+        fonts-liberation \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------------------
 # 4. INSTALL PYTHON DEPENDENCIES
@@ -41,11 +46,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ----------------------------------------------------
-# 5. COPY APPLICATION CODE
+# 5. 🔥 CRITICAL FIX: INSTALL PLAYWRIGHT BROWSERS
+# ----------------------------------------------------
+RUN playwright install chromium
+
+# ----------------------------------------------------
+# 6. COPY APP
 # ----------------------------------------------------
 COPY . /app/
 
 # ----------------------------------------------------
-# 6. DEFINE THE START COMMAND (CMD)
+# 7. START COMMAND
 # ----------------------------------------------------
-CMD ["python", "-u", "worker/main.py"]
+CMD ["python", "main.py"]
