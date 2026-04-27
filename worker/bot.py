@@ -34,7 +34,7 @@ EXCLUDED_LEAGUES = ['USA', 'Poland','Australia', 'Mexico', 'Wales', 'Germany', '
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u23', 'u21','u20', 'women', 'college']
 
 # --- GLOBALS ---
-SOFASCORE_CLIENT = None
+SOFASCORE_CLIENT = SofascoreClient(headless=True)
 firebase_manager = None
 LOCAL_TRACKED_MATCHES = {}
 
