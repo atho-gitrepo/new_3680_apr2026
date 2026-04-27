@@ -1,5 +1,6 @@
 """
-Sofascore service module - Production Grade (Fixed Module Call)
+Sofascore service module - Final Production Build
+Fixed: Module vs Instance naming conflict and forced internal initialization
 """
 
 from __future__ import annotations
@@ -9,18 +10,17 @@ import subprocess
 import sys
 import time
 
-# Pre-loading required libraries
+# --- PRE-LOAD LIBRARIES ---
 import playwright.sync_api
 from playwright_stealth import stealth
 
-# Browser installation check for Cloud Environments (Railway)
 def install_playwright_browsers():
-    """Install Playwright browsers if missing"""
+    """Install Playwright browsers for Railway environment"""
     logger = logging.getLogger(__name__)
     try:
         if os.environ.get("SKIP_BROWSER_INSTALL"):
             return True
-        logger.info("Verifying Playwright Chromium installation...")
+        logger.info("Verifying Playwright Chromium...")
         subprocess.run([
             sys.executable, "-m", "playwright", "install", "chromium"
         ], capture_output=True, text=True, timeout=300)
@@ -29,7 +29,7 @@ def install_playwright_browsers():
         logger.error(f"Browser installation error: {e}")
         return False
 
-# Trigger check on load
+# Trigger install
 install_playwright_browsers()
 
 from ..utils import get_json, get_today
@@ -51,40 +51,41 @@ from .types import (
 )
 
 class SofascoreService:
-    """
-    A class to represent the SofaScore service with built-in stealth.
-    """
-
     def __init__(self, browser_path: str = None, **kwargs):
         """
         Initializes the SofaScore service.
-        **kwargs ensures compatibility with client calls using 'use_proxy'.
+        **kwargs handles 'use_proxy' from client to avoid TypeError.
         """
-        # Initialize logger FIRST to prevent AttributeError in cleanup
+        # Logger first to prevent cleanup attribute errors
         self.logger = logging.getLogger(__name__)
         
         self.browser_path = browser_path
         self.endpoints = SofascoreEndpoints()
-        self.playwright = self.browser = self.page = self.context = None
+        
+        # RENAME instance variables to avoid collision with module names
+        self.pw_instance = None 
+        self.browser = None 
+        self.page = None 
+        self.context = None
         
         self.__init_playwright()
 
     def __init_playwright(self):
         """
-        Initialize Playwright with forced function-call logic.
+        Initialize Playwright using the Context Manager directly.
+        This bypasses the 'module' is not callable error by avoiding the 'playwright' name.
         """
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                self.logger.info(f"Initializing Playwright (attempt {attempt + 1})")
+                self.logger.info(f"Initializing Playwright Instance (attempt {attempt + 1})")
                 
-                # --- THE CRITICAL FIX: FORCED NAMESPACE ---
-                # We import the module and the function separately to avoid 
-                # the 'module is not callable' error.
+                # --- THE NUCLEAR FIX ---
+                # Access the context manager directly to avoid any naming collisions
                 from playwright.sync_api import sync_playwright
-                self.playwright = sync_playwright().start()
+                self.pw_instance = sync_playwright().start()
                 
-                # --- PROXY CONFIGURATION ---
+                # --- PROXY CONFIG ---
                 proxy_server = os.getenv("PROXY_SERVER")
                 proxy_user = os.getenv("PROXY_USER")
                 proxy_pass = os.getenv("PROXY_PASS")
@@ -113,8 +114,7 @@ class SofascoreService:
                 if self.browser_path and os.path.exists(self.browser_path):
                     launch_options['executable_path'] = self.browser_path
                 
-                self.browser = self.playwright.chromium.launch(**launch_options)
-                
+                self.browser = self.pw_instance.chromium.launch(**launch_options)
                 self.context = self.browser.new_context(
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                     viewport={'width': 1920, 'height': 1080}
@@ -123,22 +123,22 @@ class SofascoreService:
                 self.page = self.context.new_page()
                 self.page.set_default_timeout(45000)
                 
-                # Apply Stealth
+                # Apply stealth
                 stealth(self.page)
                 
-                # Session Priming
+                # Prime session
                 self.logger.info("Priming Sofascore session...")
                 self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=60000)
                 time.sleep(2) 
                 
-                self.logger.info("✅ Playwright initialized successfully.")
+                self.logger.info("✅ Service Initialized Successfully.")
                 return
                 
             except Exception as exc:
-                self.logger.error(f"❌ Playwright failed: {str(exc)}")
+                self.logger.error(f"❌ Playwright Init Error: {str(exc)}")
                 self.close()
                 if attempt == max_retries - 1:
-                    raise RuntimeError(f"Initialization fatal error: {str(exc)}") from exc
+                    raise RuntimeError(f"Could not start Playwright: {str(exc)}") from exc
 
     def close(self):
         """Clean up Playwright resources."""
@@ -149,16 +149,18 @@ class SofascoreService:
                 self.context.close()
             if self.browser:
                 self.browser.close()
-            if self.playwright:
-                self.playwright.stop()
+            if self.pw_instance:
+                self.pw_instance.stop()
         except Exception as exc:
             if hasattr(self, 'logger'):
                 self.logger.error(f"Cleanup error: {str(exc)}")
         finally:
-            self.page = self.context = self.browser = self.playwright = None
+            self.page = self.context = self.browser = self.pw_instance = None
 
     def __del__(self):
         self.close()
+
+    # --- API Retrieval Methods ---
 
     def get_live_events(self) -> list[Event]:
         try:
