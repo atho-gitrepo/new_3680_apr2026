@@ -9,7 +9,7 @@ from .types import Event, Player, Tournament, Team, Category, EntityType
 
 class SofascoreClient:
 
-    def __init__(self, browser_path: str = None, use_proxy: str = None, headless: bool = False):
+    def __init__(self, browser_path: str = None, use_proxy: str = None, headless: bool = True):
         self.logger = logging.getLogger(__name__)
         self.service: SofascoreService | None = None
         self.browser_path = browser_path
