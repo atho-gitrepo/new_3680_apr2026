@@ -21,39 +21,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 
-# --- PROXY CONFIG ---
-def get_proxy_config():
-    host = os.getenv("PROXY_HOST")
-    port = os.getenv("PROXY_PORT")
-    user = os.getenv("PROXY_USER")
-    password = os.getenv("PROXY_PASS")
-
-    if host and port:
-        if user and password:
-            proxy_url = f"http://{user}:{password}@{host}:{port}"
-        else:
-            proxy_url = f"http://{host}:{port}"
-
-        return {
-            "http": proxy_url,
-            "https": proxy_url
-        }
-    return None
-
-# --- GLOBAL SESSION ---
-SESSION = requests.Session()
-
-proxy_config = get_proxy_config()
-if proxy_config:
-    SESSION.proxies.update(proxy_config)
-    logger.info(f"✅ Proxy configured")
-else:
-    logger.warning("⚠️ No proxy configured!")
-
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-})
-
 # --- SETTINGS ---
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
@@ -148,7 +115,7 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
     try:
-        r = SESSION.post(
+        r = requests.post(
             url,
             data={
                 'chat_id': TELEGRAM_CHAT_ID,
@@ -257,8 +224,8 @@ def initialize_bot_services():
     firebase_manager = FirebaseManager(FIREBASE_CREDENTIALS)
 
     try:
-        # 🔥 IMPORTANT: pass session to Sofascore
-        SOFASCORE_CLIENT = SofascoreClient(session=SESSION)
+        # ✅ FIXED: NO session
+        SOFASCORE_CLIENT = SofascoreClient()
 
         SOFASCORE_CLIENT.initialize()
 
@@ -285,9 +252,8 @@ def run_bot_cycle():
     try:
         events = SOFASCORE_CLIENT.get_events(live=True)
 
-        # 🛑 HANDLE BLOCK / INVALID RESPONSE
         if not events or not isinstance(events, list):
-            logger.error("❌ Sofascore blocked or invalid response")
+            logger.error("❌ Sofascore blocked or empty response")
             return
 
         logger.info(f"Scanning {len(events)} matches...")
@@ -297,3 +263,22 @@ def run_bot_cycle():
 
     except Exception as e:
         logger.error(f"Cycle Error: {e}")
+
+# --- RUNNER ---
+if __name__ == "__main__":
+    logger.info("🚀 Bot Starting...")
+
+    if not initialize_bot_services():
+        logger.error("❌ Init failed.")
+        exit(1)
+
+    try:
+        while True:
+            run_bot_cycle()
+            time.sleep(SLEEP_TIME)
+
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped manually")
+
+    finally:
+        shutdown_bot()
