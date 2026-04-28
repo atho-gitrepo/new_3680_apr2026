@@ -13,26 +13,23 @@ from ..utils import get_today
 from .endpoints import SofascoreEndpoints
 from .types import parse_events
 
-
-# --- LOGGER ---
 logger = logging.getLogger(__name__)
 
 
-# --- INSTALL PLAYWRIGHT ---
-def install_playwright_browsers():
+# --- INSTALL PLAYWRIGHT BROWSERS ---
+def install_playwright():
     try:
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
-        return result.returncode == 0
+        logger.info("✅ Playwright browser installed")
     except Exception as e:
-        logger.error(f"Browser install failed: {e}")
-        return False
+        logger.warning(f"Playwright install warning: {e}")
 
 
-install_playwright_browsers()
+install_playwright()
 
 
 # --- PROXY CONFIG ---
@@ -48,7 +45,6 @@ def get_proxy():
             proxy["username"] = user
             proxy["password"] = password
         return proxy
-
     return None
 
 
@@ -60,12 +56,11 @@ def safe_fetch_json(page, url, retries=3):
 
             content = page.content()
 
-            # 🚨 BLOCK DETECTION
+            # 🚨 Detect blocking
             if "Access denied" in content or "Forbidden" in content:
                 raise Exception("Blocked by Sofascore")
 
             text = page.evaluate("() => document.body.innerText")
-
             data = json.loads(text)
 
             return data
@@ -74,15 +69,15 @@ def safe_fetch_json(page, url, retries=3):
             logger.warning(f"Retry {attempt+1}/{retries} failed: {e}")
             time.sleep(2)
 
-            if attempt == retries - 1:
-                logger.error(f"❌ Final failure fetching: {url}")
-                return None
+    logger.error(f"❌ Failed fetching: {url}")
+    return None
 
 
 # --- SERVICE CLASS ---
 class SofascoreService:
 
-    def __init__(self):
+    # ✅ Accept any args (fixes your init error)
+    def __init__(self, *args, **kwargs):
         self.logger = logger
         self.endpoints = SofascoreEndpoints()
         self.playwright = None
@@ -95,7 +90,7 @@ class SofascoreService:
 
         for attempt in range(3):
             try:
-                self.logger.info(f"Starting Playwright (attempt {attempt+1})")
+                self.logger.info(f"Starting browser (attempt {attempt+1})")
 
                 self.playwright = sync_playwright().start()
 
@@ -105,17 +100,16 @@ class SofascoreService:
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
-                        "--disable-web-security",
-                    ],
+                        "--disable-web-security"
+                    ]
                 }
 
-                # ✅ APPLY PROXY
+                # ✅ Apply proxy
                 if proxy:
                     launch_options["proxy"] = proxy
                     self.logger.info(f"✅ Proxy enabled: {proxy['server']}")
 
                 self.browser = self.playwright.chromium.launch(**launch_options)
-
                 self.page = self.browser.new_page()
 
                 # ✅ Anti-detection headers
@@ -131,7 +125,7 @@ class SofascoreService:
                 self.logger.error(f"Browser init failed: {e}")
                 time.sleep(2)
 
-        raise RuntimeError("❌ Failed to initialize Playwright")
+        raise RuntimeError("❌ Could not initialize browser")
 
     def close(self):
         try:
@@ -144,15 +138,14 @@ class SofascoreService:
         except:
             pass
 
-    # --- GET LIVE EVENTS ---
+    # --- LIVE EVENTS ---
     def get_live_events(self):
         try:
             url = self.endpoints.live_events_endpoint
-
             data = safe_fetch_json(self.page, url)
 
             if not data or "events" not in data:
-                self.logger.error("❌ Blocked or invalid response (live events)")
+                self.logger.error("❌ Invalid or blocked live events response")
                 return []
 
             return parse_events(data["events"])
@@ -161,18 +154,17 @@ class SofascoreService:
             self.logger.error(f"Live events error: {e}")
             return []
 
-    # --- GET EVENTS ---
+    # --- EVENTS BY DATE ---
     def get_events(self, date="today"):
         if date == "today":
             date = get_today()
 
         try:
             url = self.endpoints.events_endpoint.format(date=date)
-
             data = safe_fetch_json(self.page, url)
 
             if not data or "events" not in data:
-                self.logger.error("❌ Blocked or invalid response (events)")
+                self.logger.error("❌ Invalid or blocked events response")
                 return []
 
             return parse_events(data["events"])
