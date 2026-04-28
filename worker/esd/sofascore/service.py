@@ -1,190 +1,182 @@
-"""
-Sofascore service module - FINAL STABLE VERSION
-"""
+# esd/sofascore/service.py
 
 from __future__ import annotations
 import os
 import logging
+import subprocess
+import sys
+import json
 import time
-import random
-
 from playwright.sync_api import sync_playwright
 
-# ✅ SAFE STEALTH IMPORT (handles all versions)
-try:
-    from playwright_stealth.stealth import stealth_sync
-    STEALTH_MODE = "sync"
-except ImportError:
-    from playwright_stealth import stealth
-    STEALTH_MODE = "legacy"
-
-from ..utils import get_json, get_today
+from ..utils import get_today
 from .endpoints import SofascoreEndpoints
-from .types import *
+from .types import parse_events
 
 
+# --- LOGGER ---
+logger = logging.getLogger(__name__)
+
+
+# --- INSTALL PLAYWRIGHT ---
+def install_playwright_browsers():
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except Exception as e:
+        logger.error(f"Browser install failed: {e}")
+        return False
+
+
+install_playwright_browsers()
+
+
+# --- PROXY CONFIG ---
+def get_proxy():
+    host = os.getenv("PROXY_HOST")
+    port = os.getenv("PROXY_PORT")
+    user = os.getenv("PROXY_USER")
+    password = os.getenv("PROXY_PASS")
+
+    if host and port:
+        proxy = {"server": f"http://{host}:{port}"}
+        if user and password:
+            proxy["username"] = user
+            proxy["password"] = password
+        return proxy
+
+    return None
+
+
+# --- SAFE FETCH ---
+def safe_fetch_json(page, url, retries=3):
+    for attempt in range(retries):
+        try:
+            page.goto(url, timeout=30000)
+
+            content = page.content()
+
+            # 🚨 BLOCK DETECTION
+            if "Access denied" in content or "Forbidden" in content:
+                raise Exception("Blocked by Sofascore")
+
+            text = page.evaluate("() => document.body.innerText")
+
+            data = json.loads(text)
+
+            return data
+
+        except Exception as e:
+            logger.warning(f"Retry {attempt+1}/{retries} failed: {e}")
+            time.sleep(2)
+
+            if attempt == retries - 1:
+                logger.error(f"❌ Final failure fetching: {url}")
+                return None
+
+
+# --- SERVICE CLASS ---
 class SofascoreService:
-    def __init__(self, browser_path: str = None, use_proxy: str = None, headless: bool = True):
-        # ✅ Always define logger first
-        self.logger = logging.getLogger(__name__)
 
-        self.browser_path = browser_path
-        self.use_proxy = use_proxy
-        self.headless = headless
-
+    def __init__(self):
+        self.logger = logger
         self.endpoints = SofascoreEndpoints()
-
         self.playwright = None
         self.browser = None
-        self.context = None
         self.page = None
+        self._init_browser()
 
-        # Init browser
-        self.__init_playwright()
+    def _init_browser(self):
+        proxy = get_proxy()
 
-    # -------------------------------
-    # INIT PLAYWRIGHT
-    # -------------------------------
-    def __init_playwright(self):
-        max_retries = 3
-
-        for attempt in range(max_retries):
+        for attempt in range(3):
             try:
-                self.logger.info(f"Initializing Playwright (attempt {attempt+1})")
+                self.logger.info(f"Starting Playwright (attempt {attempt+1})")
 
                 self.playwright = sync_playwright().start()
 
-                proxy_cfg = None
-                if self.use_proxy:
-                    proxy_cfg = {"server": self.use_proxy}
-
-                self.browser = self.playwright.chromium.launch(
-                    headless=self.headless,
-                    proxy=proxy_cfg,
-                    args=[
+                launch_options = {
+                    "headless": True,
+                    "args": [
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
-                        "--disable-blink-features=AutomationControlled",
+                        "--disable-gpu",
+                        "--disable-web-security",
                     ],
-                )
+                }
 
-                self.context = self.browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                    locale="en-US",
-                    timezone_id="Asia/Bangkok",
-                )
+                # ✅ APPLY PROXY
+                if proxy:
+                    launch_options["proxy"] = proxy
+                    self.logger.info(f"✅ Proxy enabled: {proxy['server']}")
 
-                self.page = self.context.new_page()
-                self.page.set_default_timeout(45000)
+                self.browser = self.playwright.chromium.launch(**launch_options)
 
-                # Headers
+                self.page = self.browser.new_page()
+
+                # ✅ Anti-detection headers
                 self.page.set_extra_http_headers({
-                    "accept-language": "en-US,en;q=0.9",
-                    "referer": "https://www.google.com/",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9"
                 })
 
-                # Block heavy resources
-                self.page.route(
-                    "**/*",
-                    lambda route: route.abort()
-                    if route.request.resource_type in ["image", "font"]
-                    else route.continue_(),
-                )
-
-                # ✅ APPLY STEALTH SAFELY
-                if STEALTH_MODE == "sync":
-                    stealth_sync(self.page)
-                else:
-                    stealth(self.page)
-
-                # Warm session
-                self.page.goto("https://www.sofascore.com", wait_until="domcontentloaded")
-
-                # Human-like behavior
-                time.sleep(random.uniform(2, 4))
-                self.page.mouse.move(100, 200)
-                self.page.mouse.move(300, 400)
-
-                self.logger.info("✅ Playwright initialized successfully")
+                self.logger.info("✅ Browser ready")
                 return
 
             except Exception as e:
-                self.logger.error(f"Init failed: {e}")
-                self.close()
+                self.logger.error(f"Browser init failed: {e}")
+                time.sleep(2)
 
-                if attempt == max_retries - 1:
-                    raise RuntimeError("Playwright init failed")
+        raise RuntimeError("❌ Failed to initialize Playwright")
 
-    # -------------------------------
-    # SAFE REQUEST (ANTI-BLOCK)
-    # -------------------------------
-    def safe_get_json(self, url):
-        for attempt in range(3):
-            try:
-                time.sleep(random.uniform(1, 2))
-                return get_json(self.page, url)
-            except Exception as e:
-                self.logger.warning(f"Retry {attempt+1}: {e}")
-
-                try:
-                    self.page.goto("https://www.sofascore.com")
-                    time.sleep(2)
-                except:
-                    pass
-
-        raise Exception("Blocked by Sofascore")
-
-    # -------------------------------
-    # CLEANUP
-    # -------------------------------
     def close(self):
         try:
             if self.page:
                 self.page.close()
-            if self.context:
-                self.context.close()
             if self.browser:
                 self.browser.close()
             if self.playwright:
                 self.playwright.stop()
-        except Exception as e:
-            if hasattr(self, "logger"):
-                self.logger.error(f"Cleanup error: {e}")
-
-        self.page = None
-        self.context = None
-        self.browser = None
-        self.playwright = None
-
-    def __del__(self):
-        try:
-            self.close()
         except:
             pass
 
-    # -------------------------------
-    # API METHODS
-    # -------------------------------
-    def get_event(self, event_id: int):
-        url = self.endpoints.event_endpoint(event_id)
-        return parse_event(self.safe_get_json(url)["event"])
+    # --- GET LIVE EVENTS ---
+    def get_live_events(self):
+        try:
+            url = self.endpoints.live_events_endpoint
 
-    def get_events(self, date: str = "today"):
+            data = safe_fetch_json(self.page, url)
+
+            if not data or "events" not in data:
+                self.logger.error("❌ Blocked or invalid response (live events)")
+                return []
+
+            return parse_events(data["events"])
+
+        except Exception as e:
+            self.logger.error(f"Live events error: {e}")
+            return []
+
+    # --- GET EVENTS ---
+    def get_events(self, date="today"):
         if date == "today":
             date = get_today()
-        url = self.endpoints.events_endpoint.format(date=date)
-        return parse_events(self.safe_get_json(url)["events"])
 
-    def get_live_events(self):
-        url = self.endpoints.live_events_endpoint
-        return parse_events(self.safe_get_json(url).get("events", []))
+        try:
+            url = self.endpoints.events_endpoint.format(date=date)
 
-    def get_match_stats(self, event_id: int):
-        stats = self.safe_get_json(self.endpoints.match_stats_endpoint(event_id))
-        prob = self.safe_get_json(self.endpoints.match_probabilities_endpoint(event_id))
+            data = safe_fetch_json(self.page, url)
 
-        return parse_match_stats(
-            stats.get("statistics", {}),
-            prob.get("winProbability", {})
-        )
+            if not data or "events" not in data:
+                self.logger.error("❌ Blocked or invalid response (events)")
+                return []
+
+            return parse_events(data["events"])
+
+        except Exception as e:
+            self.logger.error(f"Events error: {e}")
+            return []
