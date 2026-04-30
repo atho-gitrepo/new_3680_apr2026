@@ -10,7 +10,7 @@ REBOOT_LIMIT = 7200    # 2 hours
 
 RUNNING = True
 LAST_REBOOT = time.time()
-LAST_HEARTBEAT = 0
+LAST_HEARTBEAT = time.time()
 
 def signal_handler(signum, frame):
     global RUNNING
