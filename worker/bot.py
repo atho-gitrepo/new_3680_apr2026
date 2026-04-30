@@ -212,28 +212,32 @@ def shutdown_bot():
 
 # --- MAIN CYCLE ---
 def run_bot_cycle():
-    global LOCAL_TRACKED_MATCHES
+    global LAST_FETCH_TIME, CACHED_EVENTS
 
-    if not SOFASCORE_CLIENT:
-        return
+    try:
+        now = time.time()
 
-    for attempt in range(3):
-        try:
+        # 🔥 USE CACHE instead of hitting API every time
+        if now - LAST_FETCH_TIME > CACHE_TTL:
             events = SOFASCORE_CLIENT.get_events(live=True)
 
-            if events and isinstance(events, list):
-                logger.info(f"Scanning {len(events)} matches")
+            if events:
+                CACHED_EVENTS = events
+                LAST_FETCH_TIME = now
+                logger.info(f"🔄 Fresh fetch: {len(events)} matches")
+            else:
+                logger.warning("⚠️ Using cached data (API blocked)")
 
-                for match in events:
-                    process_match(match)
+        else:
+            logger.info(f"♻️ Using cache: {len(CACHED_EVENTS)} matches")
 
-                break
+        # Process cached data
+        for match in CACHED_EVENTS:
+            process_match(match)
 
-        except Exception as e:
-            logger.warning(f"Retry {attempt+1}: {e}")
-
-        time.sleep(2 ** attempt)
-
+    except Exception as e:
+        logger.error(f"Cycle error: {e}")
+        
     # cleanup old matches
     now = time.time()
     LOCAL_TRACKED_MATCHES = {
