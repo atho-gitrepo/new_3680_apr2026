@@ -7,6 +7,7 @@ import subprocess
 import sys
 import json
 import time
+import random
 from playwright.sync_api import sync_playwright
 
 from ..utils import get_today
@@ -15,8 +16,7 @@ from .types import parse_events
 
 logger = logging.getLogger(__name__)
 
-
-# --- INSTALL PLAYWRIGHT BROWSERS ---
+# --- INSTALL PLAYWRIGHT ---
 def install_playwright():
     try:
         subprocess.run(
@@ -28,11 +28,16 @@ def install_playwright():
     except Exception as e:
         logger.warning(f"Playwright install warning: {e}")
 
-
 install_playwright()
 
+# --- RANDOM USER AGENTS ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/119 Safari/537.36",
+]
 
-# --- PROXY CONFIG ---
+# --- PROXY ---
 def get_proxy():
     host = os.getenv("PROXY_HOST")
     port = os.getenv("PROXY_PORT")
@@ -47,41 +52,42 @@ def get_proxy():
         return proxy
     return None
 
-
 # --- SAFE FETCH ---
 def safe_fetch_json(page, url, retries=3):
     for attempt in range(retries):
         try:
-            page.goto(url, timeout=30000)
+            # random delay (VERY IMPORTANT)
+            time.sleep(random.uniform(1.5, 3.5))
+
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
 
             content = page.content()
 
-            # 🚨 Detect blocking
-            if "Access denied" in content or "Forbidden" in content:
+            # 🚨 detect blocking
+            if any(x in content for x in ["Access denied", "Forbidden", "cloudflare"]):
                 raise Exception("Blocked by Sofascore")
 
             text = page.evaluate("() => document.body.innerText")
-            data = json.loads(text)
 
+            data = json.loads(text)
             return data
 
         except Exception as e:
-            logger.warning(f"Retry {attempt+1}/{retries} failed: {e}")
-            time.sleep(2)
+            logger.warning(f"Retry {attempt+1}/{retries}: {e}")
+            time.sleep(2 ** attempt)
 
     logger.error(f"❌ Failed fetching: {url}")
     return None
 
-
-# --- SERVICE CLASS ---
+# --- SERVICE ---
 class SofascoreService:
 
-    # ✅ Accept any args (fixes your init error)
     def __init__(self, *args, **kwargs):
         self.logger = logger
         self.endpoints = SofascoreEndpoints()
         self.playwright = None
         self.browser = None
+        self.context = None
         self.page = None
         self._init_browser()
 
@@ -99,24 +105,31 @@ class SofascoreService:
                     "args": [
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-web-security"
+                        "--disable-blink-features=AutomationControlled"
                     ]
                 }
 
-                # ✅ Apply proxy
                 if proxy:
                     launch_options["proxy"] = proxy
                     self.logger.info(f"✅ Proxy enabled: {proxy['server']}")
 
                 self.browser = self.playwright.chromium.launch(**launch_options)
-                self.page = self.browser.new_page()
 
-                # ✅ Anti-detection headers
-                self.page.set_extra_http_headers({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-                    "Accept-Language": "en-US,en;q=0.9"
-                })
+                # ✅ REALISTIC CONTEXT
+                self.context = self.browser.new_context(
+                    user_agent=random.choice(USER_AGENTS),
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US"
+                )
+
+                # ✅ Anti-detection script
+                self.context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                """)
+
+                self.page = self.context.new_page()
 
                 self.logger.info("✅ Browser ready")
                 return
@@ -125,12 +138,14 @@ class SofascoreService:
                 self.logger.error(f"Browser init failed: {e}")
                 time.sleep(2)
 
-        raise RuntimeError("❌ Could not initialize browser")
+        raise RuntimeError("❌ Browser init failed")
 
     def close(self):
         try:
             if self.page:
                 self.page.close()
+            if self.context:
+                self.context.close()
             if self.browser:
                 self.browser.close()
             if self.playwright:
@@ -138,14 +153,14 @@ class SofascoreService:
         except:
             pass
 
-    # --- LIVE EVENTS ---
+    # --- LIVE ---
     def get_live_events(self):
         try:
             url = self.endpoints.live_events_endpoint
             data = safe_fetch_json(self.page, url)
 
             if not data or "events" not in data:
-                self.logger.error("❌ Invalid or blocked live events response")
+                self.logger.error("❌ Blocked or invalid live events")
                 return []
 
             return parse_events(data["events"])
@@ -154,7 +169,7 @@ class SofascoreService:
             self.logger.error(f"Live events error: {e}")
             return []
 
-    # --- EVENTS BY DATE ---
+    # --- BY DATE ---
     def get_events(self, date="today"):
         if date == "today":
             date = get_today()
@@ -164,7 +179,7 @@ class SofascoreService:
             data = safe_fetch_json(self.page, url)
 
             if not data or "events" not in data:
-                self.logger.error("❌ Invalid or blocked events response")
+                self.logger.error("❌ Blocked or invalid events")
                 return []
 
             return parse_events(data["events"])
