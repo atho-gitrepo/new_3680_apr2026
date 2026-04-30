@@ -1,158 +1,114 @@
 """
-This module contains utility functions that are used in the project.
+Utility functions for Sofascore bot (safe version - Playwright only)
 """
 
 import re
 import time
 import json
+import logging
 from datetime import datetime
-import httpx
-from lxml import html
 from playwright.sync_api import Page
 
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------
+# DATE HELPERS
+# --------------------------------------------------
 
 def get_today() -> str:
-    """
-    Get the current date in the format "YYYY-MM-DD".
-
-    Returns:
-        str: The current date in the format "YYYY-MM-DD".
-    """
+    """Return current date as YYYY-MM-DD"""
     return time.strftime("%Y-%m-%d")
 
 
 def current_year(shift: int = 0) -> int:
-    """
-    Get the current year.
-
-    Args:
-        shift (int): The shift to the current year.
-
-    Returns:
-        int: The current year.
-    """
+    """Return current year with optional shift"""
     return datetime.now().year + shift
 
 
+# --------------------------------------------------
+# STRING UTILS
+# --------------------------------------------------
+
 def camel_to_snake(name: str) -> str:
-    """
-    Convert a camel case string to a snake case string.
-
-    Args:
-        name (str): The camel case string.
-
-    Returns:
-        str: The snake case string.
-    """
+    """Convert camelCase to snake_case"""
     return re.sub(
-        r"([a-z0-9])([A-Z])", r"\1_\2", re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+        r"([a-z0-9])([A-Z])",
+        r"\1_\2",
+        re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
     ).lower()
 
 
-def get_json(page: Page, url: str) -> dict:
+# --------------------------------------------------
+# SAFE JSON FETCH (PLAYWRIGHT ONLY)
+# --------------------------------------------------
+
+def get_json(page: Page, url: str, timeout: int = 30000) -> dict:
     """
-    Get the JSON response from the given URL.
-    Only works with the Sofascore API.
+    Fetch JSON safely using Playwright (ANTI-BLOCK VERSION)
 
     Args:
-        page (Page): The Playwright page object.
-        url (str): The URL to get the JSON response.
+        page (Page): Playwright page instance (REQUIRED)
+        url (str): API URL
+        timeout (int): request timeout
 
     Returns:
-        dict: The JSON response.
-    """
-    
-    # 🛑 CRITICAL FIX: Headers to bypass 403 Forbidden for direct API calls.
-    # We must mimic a legitimate browser request.
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.88 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        # Crucial headers for cross-site requests to trick the API firewall
-        'Origin': 'https://www.sofascore.com',
-        'Referer': 'https://www.sofascore.com/',
-        'x-requested-with': 'XMLHttpRequest', 
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-site',
-    }
+        dict: parsed JSON response
 
+    Raises:
+        RuntimeError: if blocked or invalid response
+    """
+
+    if page is None:
+        raise RuntimeError("❌ Playwright page is required (direct API disabled)")
 
     try:
-        if page is None:
-            # This is the direct API call path
-            with httpx.Client(timeout=20.0) as client: # Increased timeout for resilience
-                # FIX: Pass the headers here!
-                response = client.get(url, headers=HEADERS)
-                response.raise_for_status()
-                return response.json()
-        
-        # This is the Playwright/Scraping path
-        page.goto(url, wait_until="networkidle")
+        # Navigate safely
+        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+
         content = page.content()
-        doc = html.fromstring(content)
-        pre_text_list = doc.xpath("//pre/text()")
-        
-        if pre_text_list:
-            json_string = pre_text_list[0].strip()
-            try:
-                data = json.loads(json_string)
-                if "error" in data and "code" in data["error"]:
-                    code = data["error"]["code"]
-                    # Note: We keep the console prints here as they were in the original code
-                    if code == 403:
-                        print(
-                            "Access denied. Please use a proxt, VPN or renew your ip address."
-                        )
-                    if code == 404:
-                        print("No found.")
-                    return {}
-                return data
-            except json.JSONDecodeError as e:
-                print("Could not decode JSON:", e)
-                return {}
-        return {}
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
+
+        # 🚨 Detect blocking
+        if any(x in content.lower() for x in ["access denied", "forbidden", "cloudflare"]):
+            raise RuntimeError("🚫 Blocked by Sofascore")
+
+        # Extract JSON text
+        text = page.evaluate("() => document.body.innerText")
+
+        if not text:
+            raise RuntimeError("❌ Empty response body")
+
+        # Parse JSON
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            raise RuntimeError("❌ Invalid JSON response")
+
+        # Optional API error handling
+        if isinstance(data, dict) and "error" in data:
+            logger.warning(f"Sofascore API error: {data['error']}")
             return {}
-        # We need to re-raise the exception so it's caught by service.py and bot.py
-        raise exc
+
+        return data
+
+    except Exception as e:
+        logger.error(f"get_json error: {e}")
+        raise
 
 
-def get_document(proxies: dict = None, url: str = None) -> html.HtmlElement:
-    """
-    Get the HTML document from the given URL.
-
-    Args:
-        proxies (dict): The proxy settings.
-        url (str): The URL to get the HTML document.
-
-    Returns:
-        html.HtmlElement: The HTML document.
-    """
-    try:
-        with httpx.Client(proxy=proxies) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return html.fromstring(response.content)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            return html.fromstring("")
-        raise exc
-
+# --------------------------------------------------
+# VALIDATION
+# --------------------------------------------------
 
 def is_available_date(date: str, pattern: str) -> None:
     """
-    Check if the given date is available.
-
-    Args:
-        date (str): The date to check.
-        pattern (str): The pattern of the date.
+    Validate date format
 
     Raises:
-        ValueError: If the date is invalid
+        ValueError if invalid
     """
     date_pattern = re.compile(pattern)
+
     if date_pattern.match(date):
         datetime.strptime(date, "%d-%m-%Y")
     else:
-        raise ValueError("Invalid date.") from None
+        raise ValueError("Invalid date format")
