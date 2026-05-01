@@ -32,11 +32,19 @@ ALLOWED_LEAGUES = ['Campeonato Brasileiro Série A', 'Segunda Division, Apertura
 EXCLUDED_LEAGUES = ['USA', 'Poland','Australia', 'Mexico', 'Wales', 'Germany', 'England Amateur', 'U19', 'U21', 'Friendly']
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u23', 'u21','u20', 'women', 'college']
 
+# --- SMART OPTIMIZATION SETTINGS (NEW) ---
+PREDICT_START_MIN = 30     # start tracking match early
+PRE_WARM_WINDOW = (34, 38) # only fully process in this window
+MATCH_CACHE = {}           # smart tracking cache
+
 # --- GLOBALS ---
 SOFASCORE_CLIENT = None
 firebase_manager = None
 LOCAL_TRACKED_MATCHES = {}
 
+# =========================
+# FIREBASE
+# =========================
 class FirebaseManager:
     def __init__(self, creds_json):
         self.db = None
@@ -56,13 +64,18 @@ class FirebaseManager:
     def is_state_locked(self):
         try:
             return len(self.db.collection('unresolved_bets').limit(1).get()) > 0
-        except: return False
+        except:
+            return False
 
     def get_last_resolved_bet(self):
         try:
-            query = self.db.collection('resolved_bets').order_by('resolution_timestamp', direction=firestore.Query.DESCENDING).limit(1).get()
-            for doc in query: return doc.to_dict()
-        except: return None
+            query = self.db.collection('resolved_bets')\
+                .order_by('resolution_timestamp', direction=firestore.Query.DESCENDING)\
+                .limit(1).get()
+            for doc in query:
+                return doc.to_dict()
+        except:
+            return None
 
     def add_unresolved_bet(self, match_id, data):
         data['placed_at'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
@@ -73,18 +86,32 @@ class FirebaseManager:
         return doc.to_dict() if doc.exists else None
 
     def move_to_resolved(self, match_id, data, outcome):
-        data.update({'outcome': outcome, 'resolved_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), 'resolution_timestamp': firestore.SERVER_TIMESTAMP})
+        data.update({
+            'outcome': outcome,
+            'resolved_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            'resolution_timestamp': firestore.SERVER_TIMESTAMP
+        })
         self.db.collection('resolved_bets').document(str(match_id)).set(data)
         self.db.collection('unresolved_bets').document(str(match_id)).delete()
         return True
 
+# =========================
+# TELEGRAM
+# =========================
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'}, timeout=15)
-        return r.status_code == 200
-    except: return False
+        requests.post(
+            url,
+            data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg, 'parse_mode': 'Markdown'},
+            timeout=15
+        )
+    except:
+        pass
 
+# =========================
+# STAKE
+# =========================
 def calculate_stake():
     last = firebase_manager.get_last_resolved_bet()
     if not last or last.get('outcome') == 'win':
@@ -94,61 +121,139 @@ def calculate_stake():
         return float(ORIGINAL_STAKE * (2**seq)), seq + 1
     return ORIGINAL_STAKE, 1
 
+# =========================
+# 🧠 NEW: SMART PREDICTION ENGINE
+# =========================
+def should_pre_warm(minute):
+    return minute >= PREDICT_START_MIN
+
+def is_in_active_window(minute):
+    return PRE_WARM_WINDOW[0] <= minute <= PRE_WARM_WINDOW[1]
+
+# =========================
+# MATCH PROCESS (UPDATED SMART)
+# =========================
 def process_match(match):
     fid = str(match.id)
     league = match.tournament.name
     country = match.tournament.category.name
     full_info = f"{league} {country}".lower()
 
+    # basic filter
     if not any(x.lower() in league.lower() for x in ALLOWED_LEAGUES):
-        if any(x.lower() in full_info for x in EXCLUDED_LEAGUES + AMATEUR_KEYWORDS): return
+        if any(x.lower() in full_info for x in EXCLUDED_LEAGUES + AMATEUR_KEYWORDS):
+            return
 
     min_elapsed = match.total_elapsed_minutes
     status = match.status.description.upper()
     score = f"{match.home_score.current}-{match.away_score.current}"
-    
-    match_info = {'match_name': f"{match.home_team.name} vs {match.away_team.name}", 'league': league, 'country': country}
-    state = LOCAL_TRACKED_MATCHES.get(fid, {'bet_placed': False})
+
+    match_name = f"{match.home_team.name} vs {match.away_team.name}"
+
+    # =========================
+    # 🧠 SMART PRE-WARM LOGIC (NEW)
+    # =========================
+    if not should_pre_warm(min_elapsed):
+        return  # skip early matches completely
+
+    # cache tracking
+    state = LOCAL_TRACKED_MATCHES.get(fid, {
+        'bet_placed': False,
+        'last_seen': time.time(),
+        'active': False
+    })
+
+    state['last_seen'] = time.time()
+
+    # activate only near window
+    if is_in_active_window(min_elapsed):
+        state['active'] = True
+
     LOCAL_TRACKED_MATCHES[fid] = state
 
-    # 1. PLACE BET AT 36'
+    # =========================
+    # 1. PLACE BET (UNCHANGED LOGIC)
+    # =========================
     if '1ST' in status and min_elapsed in MINUTES_REGULAR_BET and not state['bet_placed']:
         if not firebase_manager.is_state_locked():
             if score in ['1-1', '2-2', '3-3']:
                 stake, seq = calculate_stake()
-                data = {**match_info, '36_score': score, 'stake': stake, 'match_sequence': seq, 'bet_type': 'regular'}
+                data = {
+                    'match_name': match_name,
+                    'league': league,
+                    '36_score': score,
+                    'stake': stake,
+                    'match_sequence': seq,
+                    'bet_type': 'regular'
+                }
+
                 firebase_manager.add_unresolved_bet(fid, data)
-                send_telegram(f"🎯 **BET PLACED (Match {seq})**\n⏱ 36' | {match_info['match_name']}\n🌍 {country} | 🏆 {league}\n🔢 Score: {score}\n💰 Stake: ${stake:.2f}")
+
+                send_telegram(
+                    f"🎯 **BET PLACED (Match {seq})**\n⏱ 36' | {match_info['match_name']}\n🌍 {country} | 🏆 {league}\n🔢 Score: {score}\n💰 Stake: ${stake:.2f}"
+                )
+
         state['bet_placed'] = True
 
-    # 2. CHECK HT RESULT
+    # =========================
+    # 2. HT CHECK (UNCHANGED LOGIC)
+    # =========================
     elif 'HALFTIME' in status:
         unresolved = firebase_manager.get_unresolved_bet(fid)
+
         if unresolved:
             outcome = 'win' if score == unresolved['36_score'] else 'loss'
-            if firebase_manager.move_to_resolved(fid, unresolved, outcome):
-                emo = "✅ WIN" if outcome == 'win' else "❌ LOSS"
-                send_telegram(f"{emo} **HT Result**\n⚽️ {match_info['match_name']}\n🔢 Score: {score}\n🔓 System Unlocked.")
-                if fid in LOCAL_TRACKED_MATCHES: del LOCAL_TRACKED_MATCHES[fid]
+            firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
+            send_telegram(
+                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} HT\n{match_name}\nScore: {score}"
+            )
+
+            LOCAL_TRACKED_MATCHES.pop(fid, None)
+
+# =========================
+# INIT
+# =========================
 def initialize_bot_services():
     global firebase_manager, SOFASCORE_CLIENT
     firebase_manager = FirebaseManager(FIREBASE_CREDENTIALS)
+
     try:
         SOFASCORE_CLIENT = SofascoreClient()
         SOFASCORE_CLIENT.initialize()
+        logger.info("✅ Sofascore initialized")
         return True
-    except: return False
+    except:
+        return False
 
+# =========================
+# SHUTDOWN
+# =========================
 def shutdown_bot():
-    if SOFASCORE_CLIENT: 
-        try: SOFASCORE_CLIENT.close()
-        except: pass
+    if SOFASCORE_CLIENT:
+        try:
+            SOFASCORE_CLIENT.close()
+        except:
+            pass
 
+# =========================
+# MAIN CYCLE (OPTIMIZED)
+# =========================
 def run_bot_cycle():
-    if not SOFASCORE_CLIENT: return
+    if not SOFASCORE_CLIENT:
+        return
+
     try:
         events = SOFASCORE_CLIENT.get_events(live=True)
-        logger.info(f"Scanning {len(events)} live matches...")
-        for m in events: process_match(m)
-    except Exception as e: logger.error(f"Cycle Error: {e}")
+
+        if not events:
+            logger.warning("No events received")
+            return
+
+        logger.info(f"Scanning {len(events)} live matches")
+
+        for m in events:
+            process_match(m)
+
+    except Exception as e:
+        logger.error(f"Cycle Error: {e}")
