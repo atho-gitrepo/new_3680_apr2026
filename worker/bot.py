@@ -8,22 +8,22 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from esd.sofascore import SofascoreClient
 
-# --- LOGGING ---
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(name)s | %(levelname)s | %(message)s'
 )
 logger = logging.getLogger("BetBot")
 
-# --- ENV ---
+# ---------------- ENV ----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 
-# --- SETTINGS ---
+# ---------------- SETTINGS ----------------
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
-SLEEP_TIME = 120   # 🔥 increased to reduce blocking
+SLEEP_TIME = 120
 MINUTES_REGULAR_BET = [36, 37]
 
 ALLOWED_LEAGUES = [
@@ -33,22 +33,45 @@ ALLOWED_LEAGUES = [
     'Premier League'
 ]
 
-# --- GLOBALS ---
+# ---------------- ANTI-BLOCK ENGINE ----------------
+class AntiBlock:
+    def __init__(self):
+        self.failures = 0
+        self.last_success = time.time()
+        self.base_sleep = 2
+
+    def backoff(self):
+        delay = min(30, self.base_sleep * (2 ** self.failures))
+        logger.warning(f"🛑 Anti-block sleep: {delay}s")
+        time.sleep(delay)
+
+    def success(self):
+        self.failures = 0
+        self.base_sleep = max(2, self.base_sleep - 0.5)
+        self.last_success = time.time()
+
+    def fail(self):
+        self.failures += 1
+        self.base_sleep = min(30, self.base_sleep + 2)
+
+ANTI_BLOCK = AntiBlock()
+
+# ---------------- GLOBALS ----------------
 SOFASCORE_CLIENT = None
 firebase_manager = None
 LOCAL_TRACKED_MATCHES = {}
 
-# --- FIREBASE ---
+# ---------------- FIREBASE ----------------
 class FirebaseManager:
     def __init__(self, creds_json):
         self.db = None
+
         if not creds_json:
             logger.error("Firebase credentials missing")
             return
 
         try:
-            cred_dict = json.loads(creds_json)
-            cred = credentials.Certificate(cred_dict)
+            cred = credentials.Certificate(json.loads(creds_json))
 
             if not firebase_admin._apps:
                 firebase_admin.initialize_app(cred)
@@ -83,18 +106,15 @@ class FirebaseManager:
 
     def move_to_resolved(self, match_id, data, outcome):
         data.update({
-            'outcome': outcome,
-            'resolved_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            'resolution_timestamp': firestore.SERVER_TIMESTAMP
+            "outcome": outcome,
+            "resolved_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "resolution_timestamp": firestore.SERVER_TIMESTAMP
         })
 
         self.db.collection('resolved_bets').document(str(match_id)).set(data)
         self.db.collection('unresolved_bets').document(str(match_id)).delete()
 
-# --- TELEGRAM ---
-def escape(text):
-    return str(text).replace("_", "\\_").replace("*", "\\*")
-
+# ---------------- TELEGRAM ----------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -104,7 +124,7 @@ def send_telegram(msg):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": escape(msg),
+                "text": msg,
                 "parse_mode": "Markdown"
             },
             timeout=10
@@ -112,27 +132,26 @@ def send_telegram(msg):
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
-# --- STAKE ---
+# ---------------- STAKE ----------------
 def calculate_stake():
     last = firebase_manager.get_last_resolved_bet()
 
-    if not last or last.get('outcome') == 'win':
+    if not last or last.get("outcome") == "win":
         return ORIGINAL_STAKE, 1
 
-    seq = last.get('match_sequence', 1)
+    seq = last.get("match_sequence", 1)
 
     if seq < MAX_CHASE_LEVEL:
         return ORIGINAL_STAKE * (2 ** seq), seq + 1
 
     return ORIGINAL_STAKE, 1
 
-# --- PROCESS MATCH ---
+# ---------------- PROCESS MATCH ----------------
 def process_match(match):
     try:
         fid = str(match.id)
         league = match.tournament.name
 
-        # ✅ strict filter
         if not any(x.lower() in league.lower() for x in ALLOWED_LEAGUES):
             return
 
@@ -146,9 +165,10 @@ def process_match(match):
 
         match_name = f"{match.home_team.name} vs {match.away_team.name}"
 
-        # --- BET ---
+        # -------- BET LOGIC --------
         if "1ST" in status and minute in MINUTES_REGULAR_BET and not state["bet"]:
             if not firebase_manager.is_state_locked():
+
                 if score in ["1-1", "2-2", "3-3"]:
 
                     stake, seq = calculate_stake()
@@ -161,13 +181,11 @@ def process_match(match):
                         "match_sequence": seq
                     })
 
-                    send_telegram(
-                        f"🎯 BET\n{match_name}\n36' Score: {score}\nStake: ${stake}"
-                    )
+                    send_telegram(f"🎯 BET\n{match_name}\nScore: {score}\nStake: {stake}")
 
             state["bet"] = True
 
-        # --- HALFTIME ---
+        # -------- RESULT --------
         elif "HALFTIME" in status:
             unresolved = firebase_manager.get_unresolved_bet(fid)
 
@@ -185,7 +203,7 @@ def process_match(match):
     except Exception as e:
         logger.error(f"Process error: {e}")
 
-# --- INIT ---
+# ---------------- INIT ----------------
 def initialize_bot_services():
     global firebase_manager, SOFASCORE_CLIENT
 
@@ -202,7 +220,7 @@ def initialize_bot_services():
         logger.error(f"Sofascore init error: {e}")
         return False
 
-# --- SHUTDOWN ---
+# ---------------- SHUTDOWN ----------------
 def shutdown_bot():
     try:
         if SOFASCORE_CLIENT:
@@ -210,33 +228,46 @@ def shutdown_bot():
     except:
         pass
 
-# --- MAIN CYCLE ---
+# ---------------- MAIN CYCLE (ANTI-BLOCK PROTECTED) ----------------
 def run_bot_cycle():
     global LOCAL_TRACKED_MATCHES
 
     if not SOFASCORE_CLIENT:
         return
 
-    for attempt in range(3):
-        try:
-            events = SOFASCORE_CLIENT.get_events(live=True)
+    try:
+        for attempt in range(3):
 
-            if events and isinstance(events, list):
-                logger.info(f"Scanning {len(events)} matches")
+            try:
+                events = SOFASCORE_CLIENT.get_events(live=True)
 
-                for match in events:
-                    process_match(match)
+                if events and isinstance(events, list):
+                    logger.info(f"📊 Scanning {len(events)} matches")
 
-                break
+                    ANTI_BLOCK.success()
 
-        except Exception as e:
-            logger.warning(f"Retry {attempt+1}: {e}")
+                    for match in events:
+                        process_match(match)
 
-        time.sleep(2 ** attempt)
+                    break
 
-    # cleanup old matches
+                else:
+                    raise Exception("Empty response")
+
+            except Exception as e:
+                logger.warning(f"⚠️ Retry {attempt+1}: {e}")
+                ANTI_BLOCK.fail()
+                ANTI_BLOCK.backoff()
+
+    except Exception as e:
+        logger.error(f"Cycle error: {e}")
+
+    # cleanup old tracked matches
     now = time.time()
-    LOCAL_TRACKED_MATCHES = {
-        k: v for k, v in LOCAL_TRACKED_MATCHES.items()
-        if now - v["last_seen"] < 3600
-    }
+    to_remove = [
+        k for k, v in LOCAL_TRACKED_MATCHES.items()
+        if now - v["last_seen"] > 3600
+    ]
+
+    for k in to_remove:
+        LOCAL_TRACKED_MATCHES.pop(k, None)
