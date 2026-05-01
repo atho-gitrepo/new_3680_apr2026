@@ -144,12 +144,13 @@ def process_match(match):
         status = match.status.description.upper()
         score = f"{match.home_score.current}-{match.away_score.current}"
 
+        # Initialize state if not exists
         state = LOCAL_TRACKED_MATCHES.get(fid, {"bet": False})
         LOCAL_TRACKED_MATCHES[fid] = state
 
         match_name = f"{match.home_team.name} vs {match.away_team.name}"
 
-        # --- BET ---
+        # --- BET LOGIC ---
         if "1ST" in status and minute in MINUTES_REGULAR_BET and not state["bet"]:
             if not firebase_manager.is_state_locked():
 
@@ -166,12 +167,13 @@ def process_match(match):
                     })
 
                     send_telegram(
-                        f"🎯 BET\n{match_name}\nScore: {score}\nStake: {stake}"
+                        f"🎯 *BET PLACED*\n\n*Match:* {match_name}\n*Score:* {score}\n*Stake:* {stake}"
                     )
 
-            state["bet"] = True
+            # Store timestamp instead of True to allow time-based cleanup
+            state["bet"] = time.time()
 
-        # --- HALFTIME ---
+        # --- RESOLUTION LOGIC ---
         elif "HALFTIME" in status:
             unresolved = firebase_manager.get_unresolved_bet(fid)
 
@@ -181,7 +183,7 @@ def process_match(match):
                 firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
                 send_telegram(
-                    f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'}\n{match_name}\n{score}"
+                    f"{'✅ *WIN*' if outcome == 'win' else '❌ *LOSS*'}\n\n{match_name}\nFinal HT Score: {score}"
                 )
 
                 LOCAL_TRACKED_MATCHES.pop(fid, None)
@@ -210,7 +212,7 @@ def initialize_bot_services():
         return False
 
 # --------------------------------------------------
-# MAIN CYCLE (CACHE SAFE)
+# MAIN CYCLE
 # --------------------------------------------------
 
 def run_bot_cycle():
@@ -219,6 +221,7 @@ def run_bot_cycle():
     try:
         now = time.time()
 
+        # Cache Logic
         if now - LAST_FETCH_TIME > CACHE_TTL:
             events = SOFASCORE_CLIENT.get_events(live=True)
 
@@ -227,19 +230,20 @@ def run_bot_cycle():
                 LAST_FETCH_TIME = now
                 logger.info(f"🔄 Fresh fetch: {len(events)} matches")
             else:
-                logger.warning("⚠️ Using cached data (blocked)")
+                logger.warning("⚠️ Using cached data (blocked or no events)")
 
         else:
             logger.info(f"♻️ Using cache: {len(CACHED_EVENTS)} matches")
 
+        # Process each match
         for match in CACHED_EVENTS:
             process_match(match)
 
-        # cleanup
-        now = time.time()
+        # --- CLEANUP LOGIC (Fixed Syntax) ---
+        now_cleanup = time.time()
         to_remove = [
             k for k, v in LOCAL_TRACKED_MATCHES.items()
-            if now - v["bet"] if isinstance(v["bet"], (int, float)) else 0 > 3600
+            if (now_cleanup - v["bet"] if isinstance(v["bet"], (int, float)) else 0) > 3600
         ]
 
         for k in to_remove:
@@ -247,3 +251,12 @@ def run_bot_cycle():
 
     except Exception as e:
         logger.error(f"Cycle error: {e}")
+
+# --------------------------------------------------
+# ENTRY POINT (Example usage)
+# --------------------------------------------------
+if __name__ == "__main__":
+    if initialize_bot_services():
+        while True:
+            run_bot_cycle()
+            time.sleep(SLEEP_TIME)
