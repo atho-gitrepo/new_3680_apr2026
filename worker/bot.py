@@ -24,8 +24,8 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 # --- SETTINGS ---
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
-SLEEP_TIME = 120
-MINUTES_REGULAR_BET = [36, 37]
+SLEEP_TIME = 95
+MINUTES_REGULAR_BET = [35,36,37]
 
 # --- FILTERS ---
 ALLOWED_LEAGUES = ['Campeonato Brasileiro Série A', 'Segunda Division, Apertura', 'Copa do Brasil', 'Premier League']
