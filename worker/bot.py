@@ -13,7 +13,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(name)s | %(levelname)s | %(message)s'
 )
-
 logger = logging.getLogger("BetBot")
 
 # --- ENV ---
@@ -24,33 +23,32 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 # --- SETTINGS ---
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
-SLEEP_TIME = 120
-CACHE_TTL = 120
-
+SLEEP_TIME = 120   # 🔥 increased to reduce blocking
 MINUTES_REGULAR_BET = [36, 37]
+
+ALLOWED_LEAGUES = [
+    'Campeonato Brasileiro Série A',
+    'Segunda Division',
+    'Copa do Brasil',
+    'Premier League'
+]
 
 # --- GLOBALS ---
 SOFASCORE_CLIENT = None
 firebase_manager = None
 LOCAL_TRACKED_MATCHES = {}
 
-LAST_FETCH_TIME = 0
-CACHED_EVENTS = []
-
-# --------------------------------------------------
-# FIREBASE
-# --------------------------------------------------
-
+# --- FIREBASE ---
 class FirebaseManager:
     def __init__(self, creds_json):
         self.db = None
-
         if not creds_json:
             logger.error("Firebase credentials missing")
             return
 
         try:
-            cred = credentials.Certificate(json.loads(creds_json))
+            cred_dict = json.loads(creds_json)
+            cred = credentials.Certificate(cred_dict)
 
             if not firebase_admin._apps:
                 firebase_admin.initialize_app(cred)
@@ -85,17 +83,17 @@ class FirebaseManager:
 
     def move_to_resolved(self, match_id, data, outcome):
         data.update({
-            "outcome": outcome,
-            "resolved_at": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            "resolution_timestamp": firestore.SERVER_TIMESTAMP
+            'outcome': outcome,
+            'resolved_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            'resolution_timestamp': firestore.SERVER_TIMESTAMP
         })
 
         self.db.collection('resolved_bets').document(str(match_id)).set(data)
         self.db.collection('unresolved_bets').document(str(match_id)).delete()
 
-# --------------------------------------------------
-# TELEGRAM
-# --------------------------------------------------
+# --- TELEGRAM ---
+def escape(text):
+    return str(text).replace("_", "\\_").replace("*", "\\*")
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -106,7 +104,7 @@ def send_telegram(msg):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
+                "text": escape(msg),
                 "parse_mode": "Markdown"
             },
             timeout=10
@@ -114,46 +112,43 @@ def send_telegram(msg):
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
-# --------------------------------------------------
-# STAKE LOGIC
-# --------------------------------------------------
-
+# --- STAKE ---
 def calculate_stake():
     last = firebase_manager.get_last_resolved_bet()
 
-    if not last or last.get("outcome") == "win":
+    if not last or last.get('outcome') == 'win':
         return ORIGINAL_STAKE, 1
 
-    seq = last.get("match_sequence", 1)
+    seq = last.get('match_sequence', 1)
 
     if seq < MAX_CHASE_LEVEL:
         return ORIGINAL_STAKE * (2 ** seq), seq + 1
 
     return ORIGINAL_STAKE, 1
 
-# --------------------------------------------------
-# MATCH PROCESS
-# --------------------------------------------------
-
+# --- PROCESS MATCH ---
 def process_match(match):
     try:
         fid = str(match.id)
         league = match.tournament.name
 
+        # ✅ strict filter
+        if not any(x.lower() in league.lower() for x in ALLOWED_LEAGUES):
+            return
+
         minute = match.total_elapsed_minutes
         status = match.status.description.upper()
         score = f"{match.home_score.current}-{match.away_score.current}"
 
-        # Initialize state if not exists
-        state = LOCAL_TRACKED_MATCHES.get(fid, {"bet": False})
+        state = LOCAL_TRACKED_MATCHES.get(fid, {"bet": False, "last_seen": time.time()})
+        state["last_seen"] = time.time()
         LOCAL_TRACKED_MATCHES[fid] = state
 
         match_name = f"{match.home_team.name} vs {match.away_team.name}"
 
-        # --- BET LOGIC ---
+        # --- BET ---
         if "1ST" in status and minute in MINUTES_REGULAR_BET and not state["bet"]:
             if not firebase_manager.is_state_locked():
-
                 if score in ["1-1", "2-2", "3-3"]:
 
                     stake, seq = calculate_stake()
@@ -167,13 +162,12 @@ def process_match(match):
                     })
 
                     send_telegram(
-                        f"🎯 *BET PLACED*\n\n*Match:* {match_name}\n*Score:* {score}\n*Stake:* {stake}"
+                        f"🎯 BET\n{match_name}\n36' Score: {score}\nStake: ${stake}"
                     )
 
-            # Store timestamp instead of True to allow time-based cleanup
-            state["bet"] = time.time()
+            state["bet"] = True
 
-        # --- RESOLUTION LOGIC ---
+        # --- HALFTIME ---
         elif "HALFTIME" in status:
             unresolved = firebase_manager.get_unresolved_bet(fid)
 
@@ -183,7 +177,7 @@ def process_match(match):
                 firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
                 send_telegram(
-                    f"{'✅ *WIN*' if outcome == 'win' else '❌ *LOSS*'}\n\n{match_name}\nFinal HT Score: {score}"
+                    f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'}\n{match_name}\n{score}"
                 )
 
                 LOCAL_TRACKED_MATCHES.pop(fid, None)
@@ -191,10 +185,7 @@ def process_match(match):
     except Exception as e:
         logger.error(f"Process error: {e}")
 
-# --------------------------------------------------
-# INIT
-# --------------------------------------------------
-
+# --- INIT ---
 def initialize_bot_services():
     global firebase_manager, SOFASCORE_CLIENT
 
@@ -211,43 +202,41 @@ def initialize_bot_services():
         logger.error(f"Sofascore init error: {e}")
         return False
 
-# --------------------------------------------------
-# MAIN CYCLE
-# --------------------------------------------------
-
-def run_bot_cycle():
-    global LAST_FETCH_TIME, CACHED_EVENTS
-
+# --- SHUTDOWN ---
+def shutdown_bot():
     try:
-        now = time.time()
+        if SOFASCORE_CLIENT:
+            SOFASCORE_CLIENT.close()
+    except:
+        pass
 
-        # Cache Logic
-        if now - LAST_FETCH_TIME > CACHE_TTL:
+# --- MAIN CYCLE ---
+def run_bot_cycle():
+    global LOCAL_TRACKED_MATCHES
+
+    if not SOFASCORE_CLIENT:
+        return
+
+    for attempt in range(3):
+        try:
             events = SOFASCORE_CLIENT.get_events(live=True)
 
-            if events:
-                CACHED_EVENTS = events
-                LAST_FETCH_TIME = now
-                logger.info(f"🔄 Fresh fetch: {len(events)} matches")
-            else:
-                logger.warning("⚠️ Using cached data (blocked or no events)")
+            if events and isinstance(events, list):
+                logger.info(f"Scanning {len(events)} matches")
 
-        else:
-            logger.info(f"♻️ Using cache: {len(CACHED_EVENTS)} matches")
+                for match in events:
+                    process_match(match)
 
-        # Process each match
-        for match in CACHED_EVENTS:
-            process_match(match)
+                break
 
-        # --- CLEANUP LOGIC (Fixed Syntax) ---
-        now_cleanup = time.time()
-        to_remove = [
-            k for k, v in LOCAL_TRACKED_MATCHES.items()
-            if (now_cleanup - v["bet"] if isinstance(v["bet"], (int, float)) else 0) > 3600
-        ]
+        except Exception as e:
+            logger.warning(f"Retry {attempt+1}: {e}")
 
-        for k in to_remove:
-            LOCAL_TRACKED_MATCHES.pop(k, None)
+        time.sleep(2 ** attempt)
 
-    except Exception as e:
-        logger.error(f"Cycle error: {e}")
+    # cleanup old matches
+    now = time.time()
+    LOCAL_TRACKED_MATCHES = {
+        k: v for k, v in LOCAL_TRACKED_MATCHES.items()
+        if now - v["last_seen"] < 3600
+    }
