@@ -251,12 +251,3 @@ def run_bot_cycle():
 
     except Exception as e:
         logger.error(f"Cycle error: {e}")
-
-# --------------------------------------------------
-# ENTRY POINT (Example usage)
-# --------------------------------------------------
-if __name__ == "__main__":
-    if initialize_bot_services():
-        while True:
-            run_bot_cycle()
-            time.sleep(SLEEP_TIME)
