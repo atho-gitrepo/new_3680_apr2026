@@ -139,7 +139,7 @@ def process_match(match):
                         "stake": ORIGINAL_STAKE
                     })
 
-                    send_telegram(f"🎯 BET\n{name}\n{score}")
+                    send_telegram(f"🎯 BET\n{name}\n{league}\n{score}")
 
             state["bet"] = True
 
