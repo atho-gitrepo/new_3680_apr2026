@@ -190,7 +190,7 @@ def process_match(match):
                 firebase_manager.add_unresolved_bet(fid, data)
 
                 send_telegram(
-                    f"🎯 **BET PLACED (Match {seq})**\n⏱ 36' | {match_info['match_name']}\n🌍 {country} | 🏆 {league}\n🔢 Score: {score}\n💰 Stake: ${stake:.2f}"
+                    f"🎯 **BET PLACED (Match {seq})**\n⏱ 36' | {match_name['match_name']}\n🌍 {country} | 🏆 {league}\n🔢 Score: {score}\n💰 Stake: ${stake:.2f}"
                 )
 
         state['bet_placed'] = True
