@@ -30,7 +30,7 @@ MINUTES_REGULAR_BET = [35,36,37]
 # --- FILTERS ---
 #ALLOWED_LEAGUES = ['Campeonato Brasileiro Série A', 'Segunda Division, Apertura', 'Copa do Brasil', 'Premier League']
 #EXCLUDED_LEAGUES = ['USA', 'Poland','Australia', 'Mexico', 'Wales', 'Germany', 'England Amateur', 'U19', 'U21', 'Friendly']
-AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u23', 'u21','u20', 'women', 'college']
+AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21','u20', 'women', 'college']
 
 # --- SMART OPTIMIZATION SETTINGS (NEW) ---
 PREDICT_START_MIN = 30     # start tracking match early
