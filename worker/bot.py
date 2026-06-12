@@ -176,7 +176,7 @@ def process_match(match):
     # =========================
     if '1ST' in status and min_elapsed in MINUTES_REGULAR_BET and not state['bet_placed']:
         if not firebase_manager.is_state_locked():
-            if score in ['1-1', '2-2', '3-3']:
+            if score in ['1-1', '2-2', '2-1', '2-0']:
                 stake, seq = calculate_stake()
                 data = {
                     'match_name': match_name,
