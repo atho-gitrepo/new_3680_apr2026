@@ -1,364 +1,204 @@
 # esd/sofascore/endpoints.py
-
 """
-This module contains the endpoints of the SofaScore API.
+This module contains the combined hybrid endpoints and client profiles for the 
+SofaScore and LiveScore APIs to handle fallback routing and anti-blocking transparently.
 """
 
+from typing import Union, Dict, Any, Tuple
 
-class SofascoreEndpoints:
+class HybridEndpoints:
     """
-    A class to represent the endpoints of the SofaScore API.
+    A unified configuration layer to dynamically generate URLs, optimal request parameters,
+    and anti-blocking headers for SofaScore and LiveScore API execution components.
     """
 
-    def __init__(self, base_url: str = "https://api.sofascore.com/api/v1") -> None:
-        self.base_url = base_url
+    def __init__(
+        self, 
+        sofa_base: str = "https://api.sofascore.com/api/v1",
+        live_base: str = "https://prod-public-api.livescore.com/v1/api/app"
+    ) -> None:
+        self.sofa_base = sofa_base
+        self.live_base = live_base
 
-    @property
-    def events_endpoint(self) -> str:
+    def get_provider_profile(self, provider: str = "sofascore") -> Dict[str, Any]:
         """
-        Returns the URL of the endpoint to get the scheduled events.
-
-        Returns:
-            str: The URL of the endpoint to get the scheduled events.
+        Generates dynamic anti-blocking header blueprints customized per provider platform.
+        These are designed to bypass basic Cloudflare fingerprint tracking checks.
         """
-        return self.base_url + "/sport/football/scheduled-events/{date}"
+        if provider == "livescore":
+            return {
+                "headers": {
+                    "User-Agent": "LiveScore/5.23.0 (iPhone; iOS 16.5; Scale/3.00)",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://www.livescore.com",
+                    "Referer": "https://www.livescore.com/",
+                    "Cache-Control": "no-cache"
+                },
+                "timeout": 10.0
+            }
+        
+        # Default Profile: SofaScore Web App Emulation Blueprint
+        return {
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Cache-Control": "no-cache",
+                "Origin": "https://www.sofascore.com",
+                "Referer": "https://www.sofascore.com/",
+                "X-Sofascore-Client": "web"  # Critical header flag to bypass platform blocks
+            },
+            "timeout": 8.0
+        }
 
-    @property
-    def live_events_endpoint(self) -> str:
+    # --- Global / Live Event Endpoints ---
+    def get_events_endpoint(self, date: str, provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
         """
-        Returns the URL of the endpoint to get the live events.
-
-        Returns:
-            str: The URL of the endpoint to get the live events.
+        SofaScore expects YYYY-MM-DD
+        LiveScore expects YYYYMMDD
+        Returns: (URL, QueryParameters)
         """
-        return self.base_url + "/sport/football/events/live"
+        if provider == "livescore":
+            # Strip dashes if passed from system loop to fit YYYYMMDD structure
+            sanitized_date = date.replace("-", "")
+            return f"{self.live_base}/date/soccer/{sanitized_date}/0.00", {"MD": "1"}
+        return f"{self.sofa_base}/sport/football/scheduled-events/{date}", {}
 
-    def event_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the event information.
+    def get_live_events_endpoint(self, provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/live/soccer/0.00", {"MD": "1"}
+        return f"{self.sofa_base}/sport/football/events/live", {}
 
-        Args:
-            event_id (int): The event id.
+    # --- Match Specific Endpoints ---
+    def event_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/detail/soccer/{event_id}", {}
+        return f"{self.sofa_base}/event/{event_id}", {}
 
-        Returns:
-            str: The URL of the endpoint to get the event information.
-        """
-        return f"{self.base_url}/event/{event_id}"
+    def match_stats_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/statistics/soccer/{event_id}", {}
+        return f"{self.sofa_base}/event/{event_id}/statistics", {}
 
-    def search_endpoint(self, query: str, entity_type: str) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to search for entities.
+    def match_events_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/incidents/soccer/{event_id}", {}
+        return f"{self.sofa_base}/event/{event_id}/incidents", {}
 
-        Args:
-            query (str): The search query.
-            entity_type (str): The entity type.
+    def match_lineups_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/lineups/soccer/{event_id}", {}
+        return f"{self.sofa_base}/event/{event_id}/lineups", {}
 
-        Returns:
-            str: The URL of the endpoint to search for entities.
-        """
-        return f"{self.base_url}/search/{entity_type}?q={query}&page=0"
+    def match_comments_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/commentary/soccer/{event_id}", {}
+        return f"{self.sofa_base}/event/{event_id}/comments", {}
 
-    def player_endpoint(self, player_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the player information.
+    def match_probabilities_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return "", {}
+        return f"{self.sofa_base}/event/{event_id}/win-probability", {}
 
-        Args:
-            player_id (int): The player id.
+    def match_top_players_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return "", {}
+        return f"{self.sofa_base}/event/{event_id}/best-players/summary", {}
 
-        Returns:
-            str: The URL of the endpoint to get the player information.
-        """
-        return f"{self.base_url}/player/{player_id}"
+    def match_shots_endpoint(self, event_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return "", {}
+        return f"{self.sofa_base}/event/{event_id}/shotmap", {}
 
-    def player_transfer_history_endpoint(self, player_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the player transfer history.
+    # --- Search ---
+    def search_endpoint(self, query: str, entity_type: str = "", provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"https://search-api.livescore.com/v1/api/app/search/{query}", {}
+        
+        url = f"{self.sofa_base}/search"
+        if entity_type:
+            url += f"/{entity_type}"
+        return url, {"q": query, "page": "0"}
 
-        Args:
-            player_id (int): The player id.
+    # --- Player Endpoints ---
+    def player_endpoint(self, player_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/player/{player_id}", {}
+        return f"{self.sofa_base}/player/{player_id}", {}
 
-        Returns:
-            str: The URL of the endpoint to get the player transfer history.
-        """
-        return f"{self.base_url}/player/{player_id}/transfer-history"
+    def player_stats_endpoint(self, player_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/player/{player_id}/statistics", {}
+        return f"{self.sofa_base}/player/{player_id}/statistics", {}
 
-    def player_charac_endpoint(self, player_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the player characteristics.
+    def player_transfer_history_endpoint(self, player_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/player/{player_id}/transfers", {}
+        return f"{self.sofa_base}/player/{player_id}/transfer-history", {}
 
-        Args:
-            player_id (int): The player id.
+    def player_charac_endpoint(self, player_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore": 
+            return "", {}
+        return f"{self.sofa_base}/player/{player_id}/characteristics", {}
 
-        Returns:
-            str: The URL of the endpoint to get the player characteristics.
-        """
-        return f"{self.base_url}/player/{player_id}/characteristics"
+    def player_attributes_endpoint(self, player_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore": 
+            return "", {}
+        return f"{self.sofa_base}/player/{player_id}/attribute-overviews", {}
 
-    def player_attributes_endpoint(self, player_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the player attributes.
+    # --- Team Endpoints ---
+    def team_endpoint(self, team_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/team/soccer/{team_id}", {}
+        return f"{self.sofa_base}/team/{team_id}", {}
 
-        Args:
-            player_id (int): The player id.
+    def team_players_endpoint(self, team_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/team/soccer/{team_id}/squad", {}
+        return f"{self.sofa_base}/team/{team_id}/players", {}
 
-        Returns:
-            str: The URL of the endpoint to get the player attributes.
-        """
-        return f"{self.base_url}/player/{player_id}/attribute-overviews"
-
-    def player_stats_endpoint(self, player_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the player statistics.
-
-        Args:
-            player_id (int): The player id.
-
-        Returns:
-            str: The URL of the endpoint to get the player statistics.
-        """
-        return f"{self.base_url}/player/{player_id}/statistics"
-
-    def team_endpoint(self, team_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the team information.
-
-        Args:
-            team_id (int): The team id.
-
-        Returns:
-            str: The URL of the endpoint to get the team information.
-        """
-        return f"{self.base_url}/team/{team_id}"
-
-    def team_players_endpoint(self, team_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the team players.
-
-        Args:
-            team_id (int): The team id.
-
-        Returns:
-            str: The URL of the endpoint to get the team players.
-        """
-        return self.team_endpoint(team_id) + "/players"
-
-    def team_events_endpoint(self, team_id: int, upcoming: bool, page: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the team events.
-
-        Args:
-            team_id (int): The team id.
-            upcoming (bool): Whether to get the upcoming events.
-            page (int): The page number.
-
-        Returns:
-            str: The URL of the endpoint to get the team events.
-        """
+    def team_events_endpoint(self, team_id: Union[int, str], upcoming: bool, page: int = 1, provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            _from = "results" if not upcoming else "fixtures"
+            return f"{self.live_base}/team/soccer/{team_id}/{_from}", {}
         _from = "last" if not upcoming else "next"
-        return f"{self.base_url}/team/{team_id}/events/{_from}/{page}"
+        return f"{self.sofa_base}/team/{team_id}/events/{_from}/{page}", {}
 
-    def match_stats_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the match statistics.
+    # --- Tournament / League Endpoints ---
+    def tournaments_endpoint(self, category_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/category/soccer/{category_id}", {}
+        return f"{self.sofa_base}/category/{category_id}/unique-tournaments", {}
 
-        Args:
-            event_id (int): The event id.
+    def tournament_seasons_endpoint(self, tournament_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/competitions/soccer/{tournament_id}/seasons", {}
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/seasons", {}
 
-        Returns:
-            str: The URL of the endpoint to get the match statistics.
-        """
-        return f"{self.base_url}/event/{event_id}/statistics"
+    def tournament_bracket_endpoint(self, tournament_id: Union[int, str], season_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/competitions/soccer/{tournament_id}/{season_id}/draws", {}
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/season/{season_id}/cuptrees", {}
 
-    def match_events_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the match events.
+    def tournament_standings_endpoint(self, tournament_id: Union[int, str], season_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/standings/soccer/{tournament_id}/{season_id}", {}
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/season/{season_id}/standings/total", {}
 
-        Args:
-            event_id (int): The event id.
+    def tournament_topplayers_endpoint(self, tournament_id: Union[int, str], season_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            return f"{self.live_base}/top-scorers/soccer/{tournament_id}/{season_id}", {}
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/season/{season_id}/top-players/overall", {}
 
-        Returns:
-            str: The URL of the endpoint to get the match events.
-        """
-        return f"{self.base_url}/event/{event_id}/incidents"
+    def tournament_topteams_endpoint(self, tournament_id: Union[int, str], season_id: Union[int, str], provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore": 
+            return "", {}
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/season/{season_id}/top-teams/overall", {}
 
-    def match_top_players_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the top players of a match.
-
-        Args:
-            event_id (int): The event id.
-
-        Returns:
-            str: The URL of the endpoint to get the top players of a match.
-        """
-        return f"{self.base_url}/event/{event_id}/best-players/summary"
-
-    def match_comments_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the comments of a match.
-
-        Args:
-            event_id (int): The event id.
-
-        Returns:
-            str: The URL of the endpoint to get the comments of a match.
-        """
-        return f"{self.base_url}/event/{event_id}/comments"
-
-    def match_shots_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the shots of a match.
-
-        Args:
-            event_id (int): The event id.
-
-        Returns:
-            str: The URL of the endpoint to get the shots of a match.
-        """
-        return f"{self.base_url}/event/{event_id}/shotmap"
-
-    def match_probabilities_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the match probabilities.
-
-        Args:
-            event_id (int): The event id.
-
-        Returns:
-            str: The URL of the endpoint to get the match probabilities.
-        """
-        return f"{self.base_url}/event/{event_id}/win-probability"
-
-    def match_lineups_endpoint(self, event_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the match lineups.
-
-        Args:
-            event_id (int): The event id.
-
-        Returns:
-            str: The URL of the endpoint to get the match lineups.
-        """
-        return f"{self.base_url}/event/{event_id}/lineups"
-
-    def tournaments_endpoint(self, category_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the tournaments of a category.
-
-        Args:
-            category_id (int): The category id. See esd.sofascore.types.categories.
-
-        Returns:
-            str: The URL of the endpoint to get the tournaments of a category.
-        """
-        return f"{self.base_url}/category/{category_id}/unique-tournaments"
-
-    def tournament_seasons_endpoint(self, tournament_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the seasons of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-
-        Returns:
-            str: The URL of the endpoint to get the seasons of a tournament.
-        """
-        return f"{self.base_url}/unique-tournament/{tournament_id}/seasons"
-
-    def tournament_bracket_endpoint(self, tournament_id: int, season_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the bracket of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-            season_id (int): The season id.
-
-        Returns:
-            str: The URL of the endpoint to get the bracket of a tournament.
-        """
-        return f"{self.base_url}/unique-tournament/{tournament_id}/season/{season_id}/cuptrees"
-
-    def tournament_standings_endpoint(self, tournament_id: int, season_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the standings of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-            season_id (int): The season id.
-
-        Returns:
-            str: The URL of the endpoint to get the standings of a tournament.
-        """
-        base = self.base_url + "/unique-tournament"
-        return f"{base}/{tournament_id}/season/{season_id}/standings/total"
-
-    def tournament_topteams_endpoint(self, tournament_id: int, season_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the top teams of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-            season_id (int): The season id.
-
-        Returns:
-            str: The URL of the endpoint to get the top teams of a tournament.
-        """
-        base = self.base_url + "/unique-tournament"
-        return f"{base}/{tournament_id}/season/{season_id}/top-teams/overall"
-
-    def tournament_topplayers_endpoint(self, tournament_id: int, season_id: int) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the top players of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-            season_id (int): The season id.
-
-        Returns:
-            str: The URL of the endpoint to get the top players of a tournament.
-        """
-        base = self.base_url + "/unique-tournament"
-        return f"{base}/{tournament_id}/season/{season_id}/top-players/overall"
-
-    def tournament_events_endpoint(
-        self, tournament_id: int, season_id: int, upcoming: bool, page: int
-    ) -> str:
-        # ... (remains the same) ...
-        """
-        Returns the URL of the endpoint to get the events of a tournament.
-
-        Args:
-            tournament_id (int): The tournament id.
-            season_id (int): The season id.
-            upcoming (bool): Whether to get the upcoming events.
-            page (int, optional): The page number. Defaults to 0.
-
-        Returns:
-            str: The URL of the endpoint to get the events of a tournament.
-        """
+    def tournament_events_endpoint(self, tournament_id: Union[int, str], season_id: Union[int, str], upcoming: bool, page: int = 1, provider: str = "sofascore") -> Tuple[str, Dict[str, Any]]:
+        if provider == "livescore":
+            _from = "results" if not upcoming else "fixtures"
+            return f"{self.live_base}/competitions/soccer/{tournament_id}/{season_id}/{_from}", {}
         _from = "last" if not upcoming else "next"
-        base = self.base_url + "/unique-tournament"
-        return f"{base}/{tournament_id}/season/{season_id}/events/{_from}/{page}"
+        return f"{self.sofa_base}/unique-tournament/{tournament_id}/season/{season_id}/events/{_from}/{page}", {}
