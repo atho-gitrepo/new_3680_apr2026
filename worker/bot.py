@@ -27,6 +27,7 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
 MINUTES_REGULAR_BET = [35, 36, 37]
+SLEEP_TIME = 55  #Default fallback sleep time between monitoring cycles
 
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'women', 'college']
 
