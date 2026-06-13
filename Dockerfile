@@ -1,7 +1,13 @@
 # ----------------------------------------------------
 # 1. BASE IMAGE
 # ----------------------------------------------------
+# Using the official lightweight Python slim image
 FROM python:3.11-slim-bullseye 
+
+# Prevent Python from writing .pyc files to disk
+ENV PYTHONDONTWRITEBYTECODE=1
+# Unbuffers python output so your logs stream instantly to the Railway console
+ENV PYTHONUNBUFFERED=1
 
 # ----------------------------------------------------
 # 2. WORKDIR
@@ -9,33 +15,14 @@ FROM python:3.11-slim-bullseye
 WORKDIR /app
 
 # ----------------------------------------------------
-# 3. SYSTEM DEPENDENCIES (Playwright)
+# 3. MINIMAL SYSTEM DEPENDENCIES (No Playwright Bloat)
 # ----------------------------------------------------
+# We only retain curl for the health checks and build essentials 
+# if any compiled Python wheels need to be built.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        wget \
         curl \
-        ca-certificates \
-        libglib2.0-0 \
-        libnspr4 \
-        libnss3 \
-        libdbus-1-3 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libatspi2.0-0 \
-        libx11-6 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxext6 \
-        libxfixes3 \
-        libxrandr2 \
-        libgbm1 \
-        libxcb1 \
-        libxkbcommon0 \
-        libasound2 \
-        libpangocairo-1.0-0 \
-        libgtk-3-0 \
-        fonts-liberation \
+        build-essential \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,19 +30,16 @@ RUN apt-get update && \
 # 4. INSTALL PYTHON DEPENDENCIES
 # ----------------------------------------------------
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 # ----------------------------------------------------
-# 5. 🔥 CRITICAL FIX: INSTALL PLAYWRIGHT BROWSERS
+# 5. COPY APP
 # ----------------------------------------------------
-RUN playwright install chromium
-
-# ----------------------------------------------------
-# 6. COPY APP
-# ----------------------------------------------------
+# Copy the source code tree into the working directory container path
 COPY . /app/
 
 # ----------------------------------------------------
-# 7. START COMMAND
+# 6. START COMMAND
 # ----------------------------------------------------
-CMD ["python","-u", "worker/main.py"]
+CMD ["python", "main.py"]
