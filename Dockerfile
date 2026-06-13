@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 # 5. COPY APP
 # ----------------------------------------------------
 # Copy the source code tree into the working directory container path
-COPY . /app/
+COPY worker/ .
 
 # ----------------------------------------------------
 # 6. START COMMAND
