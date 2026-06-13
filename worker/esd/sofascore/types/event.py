@@ -1,8 +1,12 @@
+#worker/esd/sofascore/types/event.py
 """
 Contains the event data types and parsers (also known as matches).
+Handles hybrid parsing workflows for both SofaScore and LiveScore data structures,
+ensuring pitch time descriptions are fully normalized.
 """
 
 import time
+import logging
 from datetime import datetime
 from dataclasses import dataclass, field
 from .team import Team, parse_team
@@ -10,13 +14,13 @@ from .team_score import TeamScore, parse_team_score
 from .tournament import Tournament, parse_tournament
 from .status import Status, parse_status
 
+logger = logging.getLogger("BetBot.TypeParser")
 
 @dataclass
 class Season:
     """
-    Season data class (also will be moved to season.py).
+    Season data class.
     """
-
     name: str
     year: str
     editor: bool
@@ -29,7 +33,6 @@ class RoundInfo:
     """
     Round info data class.
     """
-
     round: int
     name: str
     cup_round_type: int
@@ -40,7 +43,6 @@ class TimeEvent:
     """
     Time event data class, half time, extra time, etc.
     """
-
     first_injury_time: int = 0
     second_injury_time: int = 0
     third_injury_time: int = 0
@@ -53,7 +55,6 @@ class StatusTime:
     """
     Current status time data class.
     """
-
     initial: int = 0
     max: int = 0
     timestamp: int = 0
@@ -65,7 +66,6 @@ class Event:
     """
     Event data class also known as match.
     """
-
     id: int = field(default=0)
     status: Status = field(default_factory=Status)
     home_team: Team = field(default_factory=Team)
@@ -79,82 +79,42 @@ class Event:
     slug: str = field(default="")
     round_info: RoundInfo = field(default_factory=RoundInfo)
 
-    # some fields are not included
-    # custom_id: int = field(default=0)
-    # tournament: Tournament
-    # season: Season
-    # coverage: int = 0
-    # final_result_only: bool = False
-    # feed_locked: bool = False
-    # changes: Optional[Dict] = field(default_factory=dict)
-    # has_global_highlights: bool = False
-    # is_editor: bool = False
-    # detail_id: int = 1
-    # crowdsourcingDataDisplayEnabled: bool = False
-
     @property
     def current_period_start(self) -> datetime:
-        """
-        Get the current period start time.
-
-        Returns:
-            datetime: The current period start time.
-        """
-        return datetime.fromtimestamp(self.time.current_period_start)
+        try:
+            return datetime.fromtimestamp(self.time.current_period_start)
+        except (ValueError, OSError, TypeError):
+            return datetime.now()
 
     @property
     def total_elapsed_minutes(self) -> int:
-        """
-        Get the total elapsed minutes.
-
-        Returns:
-            int: The total elapsed minutes.
-        """
+        if not self.start_timestamp:
+            return 0
         return int((time.time() - self.start_timestamp) / 60)
 
     @property
     def current_elapsed_minutes(self) -> int:
-        """
-        Get the current elapsed period minutes.
-
-        Returns:
-            int: The current elapsed minutes.
-        """
+        if not self.time.current_period_start:
+            return 0
         return int((time.time() - self.time.current_period_start) / 60)
 
 
 def parse_status_time(data: dict) -> StatusTime:
-    """
-    Parse the status time data.
-
-    Args:
-        data (dict): The status time data.
-
-    Returns:
-        StatusTime: The status time object.
-    """
+    if not data:
+        return StatusTime()
     return StatusTime(
         initial=data.get("initial", 0),
-        max=data.get("max", 2700),  # 45 minutes
-        extra=data.get("extra", 9),  # 9 minutes
+        max=data.get("max", 2700),
+        extra=data.get("extra", 9),
         timestamp=data.get("timestamp", 0),
     )
 
 
 def parse_time_event(data: dict) -> TimeEvent:
-    """
-    Parse the time event data.
-
-    Args:
-        data (dict): The time event data.
-
-    Returns:
-        TimeEvent: The time event object.
-    """
+    if not data:
+        return TimeEvent()
     return TimeEvent(
-        first_injury_time=data.get(
-            "injuryTime1", 0
-        ),  # example 4 -> aggregate 4 minutes
+        first_injury_time=data.get("injuryTime1", 0),
         second_injury_time=data.get("injuryTime2", 0),
         third_injury_time=data.get("injuryTime3", 0),
         quarter_injury_time=data.get("injuryTime4", 0),
@@ -163,15 +123,8 @@ def parse_time_event(data: dict) -> TimeEvent:
 
 
 def parse_round_info(data: dict) -> RoundInfo:
-    """
-    Parse the round info data.
-
-    Args:
-        data (dict): The round info data.
-
-    Returns:
-        RoundInfo: The round info object.
-    """
+    if not data:
+        return RoundInfo(round=0, name="n/a", cup_round_type=0)
     return RoundInfo(
         round=data.get("round", 0),
         name=data.get("name", "n/a"),
@@ -179,24 +132,76 @@ def parse_round_info(data: dict) -> RoundInfo:
     )
 
 
-def parse_event(data: dict) -> Event:
+def _parse_livescore_event(data: dict) -> Event:
     """
-    Parse the event data.
-
-    Args:
-        data (dict): The event data.
-
-    Returns:
-        Event: The event object.
+    Transforms LiveScore nested data matrix frames into a standardized Event model.
+    Includes time normalization loops to maintain compatibility with downstream math checks.
     """
+    home_name = data.get("T1", [{}])[0].get("Nm", "Unknown")
+    away_name = data.get("T2", [{}])[0].get("Nm", "Unknown")
+    
+    try:
+        home_curr = int(data.get("Tr1", 0))
+        away_curr = int(data.get("Tr2", 0))
+    except (ValueError, TypeError):
+        home_curr, away_curr = 0, 0
+
+    start_ts = 0
+    if "Esd" in data:
+        try:
+            dt = datetime.strptime(str(data["Esd"]), "%Y%m%d%H%M%S")
+            start_ts = int(dt.timestamp())
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    # =========================================================================
+    # 🎯 SYNCHRONIZATION KEY: NORMALIZE LIVESCORE STRING MINUTE STATUSES
+    # =========================================================================
+    raw_eps = str(data.get("Eps", "NS")).upper()
+    normalized_status_desc = raw_eps
+
+    if "'" in raw_eps:
+        # Strip out LiveScore minute marks (e.g., "36'" -> "36")
+        clean_min = raw_eps.replace("'", "").strip()
+        if "+" in clean_min:
+            # Handle injury time structures (e.g., "45+2" -> "45")
+            clean_min = clean_min.split("+")[0].strip()
+        
+        if clean_min.isdigit():
+            normalized_status_desc = clean_min
+
+    elif raw_eps in ["HT", "HALF-TIME", "HALFTIME"]:
+        normalized_status_desc = "HT"
+    elif raw_eps in ["FT", "FULL-TIME", "FULLTIME"]:
+        normalized_status_desc = "FT"
+
     return Event(
-        id=data.get("id"),
-        start_timestamp=data.get("startTimestamp"),
-        slug=data.get("slug"),
-        # custom_id=data.get("customId"),
-        # feed_locked=data.get("feedLocked"),
-        # final_result_only=data.get("finalResultOnly"),
-        # coverage=data.get("coverage"),
+        id=data.get("Eid", 0),
+        start_timestamp=start_ts,
+        slug=f"{home_name.lower()}-{away_name.lower()}",
+        tournament=parse_tournament({"name": data.get("Stg", {}).get("Nm", "Unknown")}),
+        time=TimeEvent(current_period_start=start_ts),
+        status_time=StatusTime(),
+        home_team=parse_team({"name": home_name}),
+        away_team=parse_team({"name": away_name}),
+        home_score=parse_team_score({"current": home_curr}),
+        away_score=parse_team_score({"current": away_curr}),
+        status=parse_status({"description": normalized_status_desc}),
+        round_info=RoundInfo(round=0, name="n/a", cup_round_type=0),
+    )
+
+
+def parse_event(data: dict) -> Event:
+    if not data:
+        return Event()
+
+    if "Eid" in data:
+        return _parse_livescore_event(data)
+
+    return Event(
+        id=data.get("id", 0),
+        start_timestamp=data.get("startTimestamp", 0),
+        slug=data.get("slug", ""),
         tournament=parse_tournament(data.get("tournament", {})),
         time=parse_time_event(data.get("time", {})),
         status_time=parse_status_time(data.get("statusTime", {})),
@@ -210,13 +215,6 @@ def parse_event(data: dict) -> Event:
 
 
 def parse_events(events: list[dict]) -> list[Event]:
-    """
-    Parse the events data.
-
-    Args:
-        events (list): The events data.
-
-    Returns:
-        list[Event]: The parsed events data.
-    """
-    return [parse_event(event) for event in events]
+    if not events:
+        return []
+    return [parse_event(e) for e in events]
