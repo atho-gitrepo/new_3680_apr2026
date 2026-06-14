@@ -231,7 +231,7 @@ def process_match(match):
                 }
                 firebase_manager.add_unresolved_bet(fid, data)
                 BET_TRIGGERS.inc()  # 📊 Telemetry: Log verified bet emission
-                send_telegram(f"🎯 **BET PLACED (Match {seq})**\n⏱ Min: {live_pitch_minute}' | {match_name}\n🌍 {country} | 🏆 {league}\n🔢 Score: {score}\n💰 Stake: ${stake:.2f}")
+                send_telegram(f"🎯 **BET PLACED (Match {seq})**\n⏱ Min: {live_pitch_minute}' | {match_name}\n🌍 {full_info} \n🔢 Score: {score}\n💰 Stake: ${stake:.2f}")
         
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
