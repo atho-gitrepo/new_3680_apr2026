@@ -1,7 +1,8 @@
-#worker/bot.py
+# worker/bot.py
 """
 Core business strategy processing engine.
-Evaluates live match metrics against staking parameters and logs execution telemetry.
+Evaluates live match metrics against staking parameters, fetches 1st half odds,
+and logs execution telemetry.
 """
 
 import requests
@@ -22,12 +23,13 @@ logger = logging.getLogger("BetBot.ExecutionEngine")
 # --- PARAMETERS & ENV EXTRACTION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "YOUR_THE_ODDS_API_KEY")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
 MINUTES_REGULAR_BET = [35, 36, 37]
-SLEEP_TIME = 55  #Default fallback sleep time between monitoring cycles
+SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'women', 'college']
 
@@ -37,6 +39,21 @@ MEMORY_PRUNE_TIMEOUT = 5400
 
 # --- VOLATILE MEMORY CACHE MAP ---
 LOCAL_TRACKED_MATCHES = {}
+
+# --- GEOGRAPHICAL FLAG MAPPER ---
+COUNTRY_FLAGS = {
+    "iceland": "🇮🇸",
+    "argentina": "🇦🇷",
+    "england": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+    "germany": "🇩🇪",
+    "spain": "🇪🇸",
+    "italy": "🇮🇹",
+    "france": "🇫🇷",
+    "brazil": "🇧🇷",
+    "malaysia": "🇲🇾",
+    "belarus": "🇧🇾",
+    "faroe islands": "🇫🇴"
+}
 
 # =========================
 # FIREBASE CONFIGURATION
@@ -132,6 +149,53 @@ class FirebaseManager:
             logger.exception(f"❌ Error during database migration lifecycle for Match ID {match_id}: {e}")
             return False
 
+# ==========================================
+# 🎯 MARKET INTEGRATION: LIVE ODDS API
+# ==========================================
+def fetch_live_1st_half_odds(home_team: str, away_team: str, current_score: str) -> float | str:
+    """Queries The Odds API for live 1st half correct score markets."""
+    logger.info(f"💵 Querying 1st Half Correct Score odds: {home_team} vs {away_team}")
+    
+    url = "https://api.the-odds-api.com/v4/sports/soccer/odds-live/"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "uk,eu",         
+        "markets": "h1_correct_score",  # Targets 1st Half Correct Score specifically
+        "oddsFormat": "decimal"
+    }
+    
+    try:
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code != 200:
+            logger.error(f"The Odds API Error: {res.status_code}")
+            return "N/A"
+            
+        matches = res.json()
+        target_event = None
+        for event in matches:
+            if home_team.lower() in event['home_team'].lower() or event['home_team'].lower() in home_team.lower():
+                target_event = event
+                break
+                
+        if not target_event or not target_event.get('bookmakers'):
+            return "N/A"
+            
+        bookmaker = target_event['bookmakers'][0]
+        market_data = bookmaker['markets'][0] 
+        
+        target_outcome_name = f"Home {current_score.split('-')[0]} - Away {current_score.split('-')[1]}"
+        alt_outcome_name = current_score.replace("-", " - ")
+
+        for outcome in market_data.get('outcomes', []):
+            o_name = outcome['name']
+            if o_name == target_outcome_name or o_name == alt_outcome_name or current_score in o_name:
+                return float(outcome['price'])
+                
+        return "N/A"
+    except Exception as e:
+        logger.error(f"Failed to extract 1st Half odds: {e}")
+        return "N/A"
+
 # =========================
 # SYSTEM UTILITY AGENTS
 # =========================
@@ -215,23 +279,42 @@ def process_match(match):
     # --- PHASE 1: EVALUATE PLACEMENT ---
     if is_first_half_phase and (live_pitch_minute in MINUTES_REGULAR_BET) and not state['bet_placed']:
         if firebase_manager.is_state_locked():
-            STATE_LOCKS.inc()  # 📊 Telemetry: Lock active. Increment rejection counters.
+            STATE_LOCKS.inc()  
             logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
         else:
             if score in ['1-1', '2-2', '2-1', '2-0']:
                 logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at score {score}")
+                
+                # Fetch Real-Time 1st Half Odds
+                live_odds = fetch_live_1st_half_odds(match.home_team.name, match.away_team.name, score)
                 stake, seq = calculate_stake()
+                
+                # Dynamic Flag Mapping Selection
+                flag_emoji = COUNTRY_FLAGS.get(country.lower(), "🌍")
+
                 data = {
                     'match_name': match_name,
                     'league': league,
+                    'country': country,
                     '36_score': score,
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'regular'
+                    'bet_type': 'regular',
+                    'odds_1st_half': live_odds
                 }
                 firebase_manager.add_unresolved_bet(fid, data)
-                BET_TRIGGERS.inc()  # 📊 Telemetry: Log verified bet emission
-                send_telegram(f"🎯 **BET PLACED (Match {seq})**\n⏱ Min: {live_pitch_minute}' | {match_name}\n🌍 {full_info} \n🔢 Score: {score}\n💰 Stake: ${stake:.2f}")
+                BET_TRIGGERS.inc()  
+                
+                # --- 🔥 FIXED STYLIZED TELEGRAM MESSAGE FORMAT ---
+                odds_str = f" @{live_odds:.2f}" if isinstance(live_odds, (int, float)) else ""
+                telegram_message = (
+                    f"🎯 **REGULAR BET PLACED (Match {seq})**\n"
+                    f"⏱ {live_pitch_minute}' | {match_name}\n"
+                    f"{flag_emoji} {country} | 🏆 {league}\n"
+                    f"🔢 Score: {score}{odds_str}\n"
+                    f"💰 Stake: ${stake:.2f}"
+                )
+                send_telegram(telegram_message)
         
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
@@ -284,5 +367,5 @@ def run_bot_cycle():
         prune_volatile_cache_leaks()
     except Exception as e:
         logger.error(f"Ingestion lifecycle exception: {e}")
-        API_FAILURES.inc()  # 📊 Telemetry: Track network extraction error rates
+        API_FAILURES.inc()  
 
