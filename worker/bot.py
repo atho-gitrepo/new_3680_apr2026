@@ -1,4 +1,4 @@
-# worker/bot.py
+#worker/bot.py
 """
 Core business strategy processing engine.
 Evaluates live match metrics against staking parameters and logs execution telemetry.
@@ -27,7 +27,7 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 4
 MINUTES_REGULAR_BET = [35, 36, 37]
-SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
+SLEEP_TIME = 55  #Default fallback sleep time between monitoring cycles
 
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'friendly', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'women', 'college']
 
@@ -37,21 +37,6 @@ MEMORY_PRUNE_TIMEOUT = 5400
 
 # --- VOLATILE MEMORY CACHE MAP ---
 LOCAL_TRACKED_MATCHES = {}
-
-# --- 🔥 FIXED GEOGRAPHICAL FLAG MAP ---
-COUNTRY_FLAGS = {
-    "iceland": "🇮🇸",
-    "argentina": "🇦🇷",
-    "england": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-    "germany": "🇩🇪",
-    "spain": "🇪🇸",
-    "italy": "🇮🇹",
-    "france": "🇫🇷",
-    "brazil": "🇧🇷",
-    "malaysia": "🇲🇾",
-    "belarus": "🇧🇾",
-    "faroe islands": "🇫🇴"
-}
 
 # =========================
 # FIREBASE CONFIGURATION
@@ -239,7 +224,6 @@ def process_match(match):
                 data = {
                     'match_name': match_name,
                     'league': league,
-                    'country': country,
                     '36_score': score,
                     'stake': stake,
                     'match_sequence': seq,
@@ -247,19 +231,7 @@ def process_match(match):
                 }
                 firebase_manager.add_unresolved_bet(fid, data)
                 BET_TRIGGERS.inc()  # 📊 Telemetry: Log verified bet emission
-                
-                # Fetch matching flag emoji
-                flag_emoji = COUNTRY_FLAGS.get(country.lower(), "🌍")
-                
-                # --- 🔥 EXACT TELEGRAM FORMAT ---
-                telegram_message = (
-                    f"🎯 **REGULAR BET PLACED (Match {seq})**\n"
-                    f"⏱ {live_pitch_minute}' | {match_name}\n"
-                    f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score}\n"
-                    f"💰 Stake: ${stake:.2f}"
-                )
-                send_telegram(telegram_message)
+                send_telegram(f"🎯 **BET PLACED (Match {seq})**\n⏱ Min: {live_pitch_minute}' | {match_name}\n🌍 {full_info} \n🔢 Score: {score}\n💰 Stake: ${stake:.2f}")
         
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
