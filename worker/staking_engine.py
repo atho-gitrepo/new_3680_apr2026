@@ -47,6 +47,9 @@ SEQUENCE_DISPLAY = " → ".join(f"${s}" for s in STAKE_SEQUENCE)
 
 
 class StakingEngine:
+    # Backward-compatible class-level access for supervisor code.
+    MAX_CONSECUTIVE_LOSSES = MAX_CONSECUTIVE_LOSSES
+
     """
     Manages the Dynamic Percentage staking system.
     Tracks current step, consecutive losses, pause states, and statistics.
