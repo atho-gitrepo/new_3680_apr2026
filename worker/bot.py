@@ -40,14 +40,14 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 3
 
-# Timing parameters
-MINUTES_REGULAR_BET = [35, 36, 37]
+# Timing parameters - NEW: Check at 25 minutes for 0-0 matches
+MINUTES_REGULAR_BET = [25]  # Changed to check at 25 minutes only
 SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
 
-PREDICT_START_MIN = 30
-PRE_WARM_WINDOW = (34, 38)
+PREDICT_START_MIN = 24  # Lowered to start checking from 24 minutes
+PRE_WARM_WINDOW = (23, 27)  # Expanded window to catch matches around 25 minutes
 MEMORY_PRUNE_TIMEOUT = 5400
 
 # --- VOLATILE MEMORY CACHE MAP ---
@@ -428,7 +428,7 @@ def process_match(match):
         is_first_half_phase = True
     elif '1ST' in status:
         is_first_half_phase = True
-        live_pitch_minute = getattr(match, 'total_elapsed_minutes', match.get('total_elapsed_minutes', 35))
+        live_pitch_minute = getattr(match, 'total_elapsed_minutes', match.get('total_elapsed_minutes', 25))
 
     if live_pitch_minute is None or live_pitch_minute < PREDICT_START_MIN:
         return
@@ -447,14 +447,16 @@ def process_match(match):
 
     LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 1: EVALUATE PLACEMENT ---
+    # --- PHASE 1: EVALUATE PLACEMENT - Check for 0-0 at 25 minutes ---
+    # NEW LOGIC: Only bet on 0-0 matches at 25 minutes for over 0.5 goals
     if is_first_half_phase and (live_pitch_minute in MINUTES_REGULAR_BET) and not state['bet_placed']:
-        if firebase_manager.is_state_locked():
-            STATE_LOCKS.inc()
-            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
-        else:
-            if score in ['1-1', '2-2', '2-0', '0-2']:
-                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at score {score}")
+        # Check if the score is 0-0
+        if score == '0-0':
+            if firebase_manager.is_state_locked():
+                STATE_LOCKS.inc()
+                logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
+            else:
+                logger.info(f"⚡ QUALIFIED: 0-0 at {live_pitch_minute}' - Firing placement routine for {match_name}")
                 stake, seq = calculate_stake()
 
                 # Fetch matching country emoji flag using the normalized low-case string slug
@@ -470,10 +472,11 @@ def process_match(match):
                     'league': league,
                     'country': country,
                     'country_slug': country_slug,
-                    '36_score': score,
+                    'trigger_minute': live_pitch_minute,  # Store the minute we placed the bet
+                    'trigger_score': score,  # Store 0-0 as trigger score
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'regular',
+                    'bet_type': 'over0.5',  # Changed bet type
                     'staking_step': _staking_engine.current_step + 1 if _staking_engine else 0,
                     'staking_sequence': STAKE_SEQUENCE if _staking_engine else [],
                 }
@@ -482,22 +485,26 @@ def process_match(match):
 
                 # Enhanced clean Telegram string notification alert layout
                 send_telegram(
-                    f"🎯 **BET PLACED (Match {seq})**\n"
+                    f"🎯 **BET PLACED - OVER 0.5 GOALS**\n"
                     f"⏱ Min: {live_pitch_minute}' | {match_name}\n"
                     f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score}\n"
+                    f"🔢 Score: {score} (Betting on ANY goal to be scored)\n"
                     f"💰 Stake: ${stake:.2f}{step_display}"
                 )
+        else:
+            logger.debug(f"⏭️ Match {match_name} at {live_pitch_minute}' has score {score}, not 0-0. Skipping.")
 
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 2: HALFTIME RESOLUTION ---
+    # --- PHASE 2: HALFTIME RESOLUTION - Check if a goal was scored ---
     elif status in ['HT', 'HALFTIME', 'HALF']:
         unresolved = firebase_manager.get_unresolved_bet(fid)
         if unresolved:
-            trigger_score = unresolved.get('36_score')
-            outcome = 'win' if score == trigger_score else 'loss'
+            trigger_score = unresolved.get('trigger_score', '0-0')
+            # For over 0.5, we win if the score is NOT 0-0 at halftime
+            # Check if any team has scored (score != 0-0)
+            outcome = 'win' if score != '0-0' else 'loss'
 
             db_league = unresolved.get('league', league)
             db_country = unresolved.get('country', country)
@@ -505,6 +512,7 @@ def process_match(match):
             flag_emoji = COUNTRY_FLAGS.get(db_slug.lower(), COUNTRY_FLAGS.get(db_country.lower(), "🌍"))
 
             stake = unresolved.get('stake', 0)
+            trigger_minute = unresolved.get('trigger_minute', 25)
 
             # --- NEW: Record result in staking engine ---
             if _staking_engine:
@@ -515,7 +523,9 @@ def process_match(match):
                     'country': db_country,
                     'score': score,
                     'trigger_score': trigger_score,
+                    'trigger_minute': trigger_minute,
                     'stake': stake,
+                    'bet_type': 'over0.5',
                 }
                 result = _staking_engine.record_result(is_win, match_info)
 
@@ -530,12 +540,14 @@ def process_match(match):
 
             firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
+            # Update the message to reflect over 0.5 betting
             send_telegram(
-                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement**\n"
-                f"⏱ 45' | {match_name}\n"
+                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Over 0.5**\n"
+                f"⏱ HT (45') | {match_name}\n"
                 f"{flag_emoji} {db_country} | 🏆 {db_league}\n"
-                f"🔢 Score: {score} (Target: {trigger_score})\n"
+                f"🔢 Final HT Score: {score} (Started 0-0 at {trigger_minute}')\n"
                 f"💰 Stake: ${stake:.2f}{step_display}{bankroll_display}{profit_display}"
+                f"\n📊 {'Goal scored! ✅' if outcome == 'win' else 'No goals scored ❌'}"
             )
             LOCAL_TRACKED_MATCHES.pop(fid, None)
 
