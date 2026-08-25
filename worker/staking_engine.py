@@ -39,8 +39,8 @@ MAX_CONSECUTIVE_LOSSES = 3
 PAUSE_DURATION = 3600  # 1 hour in seconds
 
 # Bet odds (fixed at 1.45)
-ODDS = 1.45
-PROFIT_MULTIPLIER = ODDS - 1  # 0.45
+ODDS = 2
+PROFIT_MULTIPLIER = ODDS - 1  # 1
 
 # Status display formatting
 SEQUENCE_DISPLAY = " → ".join(f"${s}" for s in STAKE_SEQUENCE)
