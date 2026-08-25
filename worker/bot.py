@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 BetBot - Live Match Betting Engine
-Strategy: Parlay - Over 0.5 Goals + Over Corners at 25 minutes (0-0)
-Filters: xG thresholds for both teams (with fallback to alternative metrics)
+Strategy: Over 0.5 Goals at 25 minutes (0-0)
 """
 
 import requests
@@ -35,8 +34,6 @@ FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 # LOGGING CONFIGURATION
 # ============================================================
 goal_logger = logging.getLogger("BetBot.Goals")
-xg_logger = logging.getLogger("BetBot.xG")
-corner_logger = logging.getLogger("BetBot.Corners")
 stats_logger = logging.getLogger("BetBot.Stats")
 
 def setup_data_loggers():
@@ -48,16 +45,6 @@ def setup_data_loggers():
     goal_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
     goal_logger.addHandler(goal_handler)
     goal_logger.setLevel(logging.INFO)
-
-    xg_handler = logging.FileHandler(f"{log_dir}/xg.log")
-    xg_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    xg_logger.addHandler(xg_handler)
-    xg_logger.setLevel(logging.INFO)
-
-    corner_handler = logging.FileHandler(f"{log_dir}/corners.log")
-    corner_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    corner_logger.addHandler(corner_handler)
-    corner_logger.setLevel(logging.INFO)
 
     stats_handler = logging.FileHandler(f"{log_dir}/match_stats.log")
     stats_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
@@ -75,33 +62,8 @@ MINUTES_REGULAR_BET = [25]
 SLEEP_TIME = 55
 
 # ============================================================
-# FILTER CONFIGURATION - WITH FALLBACK OPTIONS
+# FILTER CONFIGURATION
 # ============================================================
-XG_THRESHOLDS = {
-    'max_home_xg': 1.2,
-    'max_away_xg': 1.2,
-    'max_total_xg': 2.0,
-    'min_total_xg': 0.3,
-}
-
-# Fallback: Use shots on target as proxy for xG when xG is unavailable
-FALLBACK_FILTERS = {
-    'use_fallback_when_no_xg': True,  # Use shots/corners when xG not available
-    'min_shots_on_target_fallback': 1,  # Minimum SOT per team (as proxy for xG)
-    'min_corners_fallback': 1,  # Minimum corners (as proxy for attacking intent)
-}
-
-XG_DIFF_THRESHOLDS = {
-    'max_xg_diff': 0.8,
-}
-
-ADVANCED_FILTERS = {
-    'min_shots_on_target': 1,
-    'min_total_shots': 3,
-    'min_corners_for_bet': 1,
-    'max_corners_for_bet': 8,  # Increased to allow more matches
-}
-
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
 
 PREDICT_START_MIN = 24
@@ -139,39 +101,8 @@ COUNTRY_FLAGS = {
 def log_goal_data(match_name: str, score: str, minute: int, league: str, country: str):
     goal_logger.info(f"GOAL | {match_name} | {score} | {minute}' | {league} | {country}")
 
-def log_xg_data(match_name: str, home_xg: float, away_xg: float, total_xg: float,
-                minute: int, league: str, country: str, passed_filters: bool = False,
-                fallback: bool = False):
-    status = "PASSED" if passed_filters else "FAILED"
-    fallback_str = " (FALLBACK)" if fallback else ""
-    xg_logger.info(f"xG {status}{fallback_str} | {match_name} | H:{home_xg:.2f} A:{away_xg:.2f} Total:{total_xg:.2f} | {minute}' | {league} | {country}")
-
-def log_corner_data(match_name: str, corners: int, minute: int, league: str, country: str,
-                    is_trigger: bool = False, is_final: bool = False):
-    status = "TRIGGER" if is_trigger else ("FINAL" if is_final else "")
-    corner_logger.info(f"CORNERS {status} | {match_name} | {corners} | {minute}' | {league} | {country}")
-
-def log_match_stats(match_name: str, stats: Dict[str, Any], minute: int, league: str, country: str):
-    home_xg = stats.get('home_xg', 0)
-    away_xg = stats.get('away_xg', 0)
-    total_xg = stats.get('total_xg', 0)
-    home_sot = stats.get('home_shots_on_target', 0)
-    away_sot = stats.get('away_shots_on_target', 0)
-    total_shots = stats.get('home_total_shots', 0) + stats.get('away_total_shots', 0)
-    home_corners = stats.get('home_corners', 0)
-    away_corners = stats.get('away_corners', 0)
-    has_xg = stats.get('has_xg_data', False)
-
-    xg_str = f"H={home_xg:.2f} A={away_xg:.2f} T={total_xg:.2f}" if has_xg else "NO_xG_DATA"
-
-    stats_logger.info(
-        f"STATS | {match_name} | {minute}' | "
-        f"xG: {xg_str} | "
-        f"SOT: H={home_sot} A={away_sot} | "
-        f"Shots: {total_shots} | "
-        f"Corners: H={home_corners} A={away_corners} T={home_corners+away_corners} | "
-        f"{league} | {country}"
-    )
+def log_match_stats(match_name: str, minute: int, league: str, country: str):
+    stats_logger.info(f"STATS | {match_name} | {minute}' | {league} | {country}")
 
 # =========================
 # STAKING ENGINE MANAGEMENT
@@ -436,285 +367,6 @@ def extract_hybrid_geography(match) -> tuple[str, str, str]:
     return "Unknown League", "World", "world"
 
 # =========================
-# LIVESCORE CORNER EXTRACTION FUNCTIONS
-# =========================
-
-def extract_livescore_corners(match_data: dict) -> int:
-    try:
-        corners = 0
-
-        if 'Corner' in match_data:
-            return int(match_data.get('Corner', 0))
-
-        if 'Stat' in match_data:
-            stat_rows = match_data.get('Stat', [])
-            for row in stat_rows:
-                if isinstance(row, dict):
-                    stat_type = row.get('Type', '')
-                    if stat_type == 'Corners':
-                        try:
-                            home = float(row.get('Value1', 0))
-                            away = float(row.get('Value2', 0))
-                            corners = int(home + away)
-                            return corners
-                        except (ValueError, TypeError):
-                            pass
-
-        if 'SPrd' in match_data:
-            for period in match_data.get('SPrd', []):
-                if 'Stat' in period:
-                    for row in period.get('Stat', []):
-                        if isinstance(row, dict) and row.get('Type') == 'Corners':
-                            try:
-                                home = float(row.get('Value1', 0))
-                                away = float(row.get('Value2', 0))
-                                corners = int(home + away)
-                                return corners
-                            except (ValueError, TypeError):
-                                pass
-
-        if 'T1' in match_data:
-            for team_data in [match_data.get('T1', []), match_data.get('T2', [])]:
-                if team_data and isinstance(team_data, list) and len(team_data) > 0:
-                    team = team_data[0] if isinstance(team_data[0], dict) else {}
-                    if 'Corner' in team:
-                        corners += int(team.get('Corner', 0))
-                    elif 'Cnr' in team:
-                        corners += int(team.get('Cnr', 0))
-
-        if 'Agg' in match_data:
-            agg = match_data.get('Agg', {})
-            if isinstance(agg, dict):
-                corners = int(agg.get('Corner', 0))
-
-        return corners
-
-    except Exception as e:
-        logger.debug(f"Error extracting LiveScore corners: {e}")
-        return 0
-
-def extract_livescore_corners_from_match(match, service) -> int:
-    try:
-        match_id = None
-        if hasattr(match, 'id'):
-            match_id = str(match.id)
-        elif isinstance(match, dict):
-            match_id = str(match.get('Eid') or match.get('id', ''))
-
-        if not match_id:
-            return 0
-
-        if isinstance(match, dict):
-            corners = extract_livescore_corners(match)
-            if corners > 0:
-                return corners
-
-        if service and hasattr(service, 'get_raw_statistics'):
-            stats_data = service.get_raw_statistics(match_id)
-            if stats_data and isinstance(stats_data, dict):
-                corners = extract_livescore_corners(stats_data)
-                if corners > 0:
-                    return corners
-
-        return 0
-    except Exception as e:
-        logger.debug(f"Failed to get LiveScore corners for match: {e}")
-        return 0
-
-# =========================
-# xG AND STATS EXTRACTION FUNCTIONS
-# =========================
-
-def extract_livescore_xg_and_stats(match_data: dict) -> Dict[str, Any]:
-    stats = {
-        'home_xg': 0.0,
-        'away_xg': 0.0,
-        'total_xg': 0.0,
-        'home_shots_on_target': 0,
-        'away_shots_on_target': 0,
-        'home_total_shots': 0,
-        'away_total_shots': 0,
-        'home_corners': 0,
-        'away_corners': 0,
-        'home_fouls': 0,
-        'away_fouls': 0,
-        'has_xg_data': False
-    }
-
-    try:
-        # Try direct xG fields first
-        if 'xG' in match_data:
-            try:
-                xg_data = match_data.get('xG', {})
-                if isinstance(xg_data, dict):
-                    stats['home_xg'] = float(xg_data.get('home', 0))
-                    stats['away_xg'] = float(xg_data.get('away', 0))
-                    stats['total_xg'] = stats['home_xg'] + stats['away_xg']
-                    stats['has_xg_data'] = True
-                    return stats
-            except (ValueError, TypeError):
-                pass
-
-        # Try statistics arrays
-        if 'Stat' in match_data:
-            stat_rows = match_data.get('Stat', [])
-            for row in stat_rows:
-                if isinstance(row, dict):
-                    stat_type = row.get('Type', '')
-                    try:
-                        home_val = float(row.get('Value1', 0))
-                        away_val = float(row.get('Value2', 0))
-                    except (ValueError, TypeError):
-                        home_val, away_val = 0, 0
-
-                    if stat_type in ['ExpectedGoals', 'xG', 'Xg']:
-                        stats['home_xg'] = home_val
-                        stats['away_xg'] = away_val
-                        stats['total_xg'] = home_val + away_val
-                        stats['has_xg_data'] = True
-                    elif stat_type == 'ShotsOnTarget':
-                        stats['home_shots_on_target'] = int(home_val)
-                        stats['away_shots_on_target'] = int(away_val)
-                    elif stat_type == 'TotalShots' or stat_type == 'Shots':
-                        stats['home_total_shots'] = int(home_val)
-                        stats['away_total_shots'] = int(away_val)
-                    elif stat_type == 'Corners':
-                        stats['home_corners'] = int(home_val)
-                        stats['away_corners'] = int(away_val)
-                    elif stat_type == 'Fouls':
-                        stats['home_fouls'] = int(home_val)
-                        stats['away_fouls'] = int(away_val)
-
-        if not stats['has_xg_data'] and 'SPrd' in match_data:
-            for period in match_data.get('SPrd', []):
-                if 'Stat' in period:
-                    for row in period.get('Stat', []):
-                        if isinstance(row, dict):
-                            stat_type = row.get('Type', '')
-                            if stat_type in ['ExpectedGoals', 'xG', 'Xg']:
-                                try:
-                                    home_val = float(row.get('Value1', 0))
-                                    away_val = float(row.get('Value2', 0))
-                                    stats['home_xg'] = home_val
-                                    stats['away_xg'] = away_val
-                                    stats['total_xg'] = home_val + away_val
-                                    stats['has_xg_data'] = True
-                                    break
-                                except (ValueError, TypeError):
-                                    pass
-                    if stats['has_xg_data']:
-                        break
-
-        return stats
-
-    except Exception as e:
-        logger.debug(f"Error extracting xG from LiveScore: {e}")
-        return stats
-
-def get_match_xg_and_stats(match, service) -> Dict[str, Any]:
-    try:
-        match_id = None
-        if hasattr(match, 'id'):
-            match_id = str(match.id)
-        elif isinstance(match, dict):
-            match_id = str(match.get('Eid') or match.get('id', ''))
-
-        if not match_id:
-            return {'has_xg_data': False}
-
-        if isinstance(match, dict):
-            stats = extract_livescore_xg_and_stats(match)
-            if stats['has_xg_data'] or stats.get('home_shots_on_target', 0) > 0:
-                return stats
-
-        if service and hasattr(service, 'get_raw_statistics'):
-            stats_data = service.get_raw_statistics(match_id)
-            if stats_data and isinstance(stats_data, dict):
-                stats = extract_livescore_xg_and_stats(stats_data)
-                return stats
-
-        return {'has_xg_data': False}
-    except Exception as e:
-        logger.debug(f"Failed to get xG for match: {e}")
-        return {'has_xg_data': False}
-
-# =========================
-# FILTER VALIDATION FUNCTIONS - UPDATED WITH FALLBACK
-# =========================
-
-def check_xg_filters(stats: Dict[str, Any]) -> Tuple[bool, str, bool]:
-    """
-    Check xG filters. Returns (passed, reason_message, used_fallback)
-    """
-    has_xg = stats.get('has_xg_data', False)
-    home_xg = stats.get('home_xg', 0)
-    away_xg = stats.get('away_xg', 0)
-    total_xg = stats.get('total_xg', 0)
-    home_sot = stats.get('home_shots_on_target', 0)
-    away_sot = stats.get('away_shots_on_target', 0)
-
-    # If we have xG data, use it
-    if has_xg:
-        if home_xg > XG_THRESHOLDS['max_home_xg']:
-            return False, f"Home xG too high: {home_xg:.2f} > {XG_THRESHOLDS['max_home_xg']}", False
-
-        if away_xg > XG_THRESHOLDS['max_away_xg']:
-            return False, f"Away xG too high: {away_xg:.2f} > {XG_THRESHOLDS['max_away_xg']}", False
-
-        if total_xg > XG_THRESHOLDS['max_total_xg']:
-            return False, f"Total xG too high: {total_xg:.2f} > {XG_THRESHOLDS['max_total_xg']}", False
-
-        if total_xg < XG_THRESHOLDS['min_total_xg']:
-            return False, f"Total xG too low: {total_xg:.2f} < {XG_THRESHOLDS['min_total_xg']}", False
-
-        xg_diff = abs(home_xg - away_xg)
-        if xg_diff > XG_DIFF_THRESHOLDS['max_xg_diff']:
-            return False, f"xG difference too high: {xg_diff:.2f} > {XG_DIFF_THRESHOLDS['max_xg_diff']}", False
-
-        return True, f"xG: H={home_xg:.2f}, A={away_xg:.2f}, Total={total_xg:.2f}", False
-
-    # If no xG data and fallback is enabled, use shots on target as proxy
-    if FALLBACK_FILTERS['use_fallback_when_no_xg']:
-        if home_sot >= FALLBACK_FILTERS['min_shots_on_target_fallback'] and \
-           away_sot >= FALLBACK_FILTERS['min_shots_on_target_fallback']:
-            return True, f"FALLBACK: SOT H={home_sot}, A={away_sot}", True
-        else:
-            return False, f"FALLBACK FAILED: SOT H={home_sot}, A={away_sot} (need {FALLBACK_FILTERS['min_shots_on_target_fallback']} each)", True
-
-    # No xG data and fallback disabled
-    return False, "No xG data available and fallback disabled", False
-
-def check_advanced_filters(stats: Dict[str, Any], current_corners: int, has_xg: bool) -> Tuple[bool, str]:
-    """
-    Check advanced filters. More lenient if we don't have full data.
-    """
-    home_sot = stats.get('home_shots_on_target', 0)
-    away_sot = stats.get('away_shots_on_target', 0)
-    home_total_shots = stats.get('home_total_shots', 0)
-    away_total_shots = stats.get('away_total_shots', 0)
-
-    # If we have xG data, be stricter
-    if has_xg:
-        if home_sot < ADVANCED_FILTERS['min_shots_on_target']:
-            return False, f"Home shots on target too low: {home_sot} < {ADVANCED_FILTERS['min_shots_on_target']}"
-
-        if away_sot < ADVANCED_FILTERS['min_shots_on_target']:
-            return False, f"Away shots on target too low: {away_sot} < {ADVANCED_FILTERS['min_shots_on_target']}"
-
-        total_shots = home_total_shots + away_total_shots
-        if total_shots < ADVANCED_FILTERS['min_total_shots']:
-            return False, f"Total shots too low: {total_shots} < {ADVANCED_FILTERS['min_total_shots']}"
-
-    # Always check corners (this is part of the bet)
-    if current_corners < ADVANCED_FILTERS['min_corners_for_bet']:
-        return False, f"Too few corners: {current_corners} < {ADVANCED_FILTERS['min_corners_for_bet']}"
-
-    if current_corners > ADVANCED_FILTERS['max_corners_for_bet']:
-        return False, f"Too many corners: {current_corners} > {ADVANCED_FILTERS['max_corners_for_bet']}"
-
-    return True, "All advanced filters passed"
-
-# =========================
 # CORE EVALUATION PIPELINE
 # =========================
 
@@ -776,68 +428,14 @@ def process_match(match):
     # --- PHASE 1: EVALUATE PLACEMENT - Check for 0-0 at 25 minutes ---
     if is_first_half_phase and (live_pitch_minute in MINUTES_REGULAR_BET) and not state['bet_placed']:
         if score == '0-0':
-            # Get current corner count and xG stats
-            current_corners = 0
-            xg_stats = {}
-
-            try:
-                if isinstance(match, dict):
-                    current_corners = extract_livescore_corners(match)
-                    xg_stats = extract_livescore_xg_and_stats(match)
-
-                if current_corners == 0 and SOFASCORE_CLIENT and SOFASCORE_CLIENT.service:
-                    current_corners = extract_livescore_corners_from_match(match, SOFASCORE_CLIENT.service)
-
-                # Only fetch stats if we don't have them and we need them for filtering
-                if not xg_stats.get('has_xg_data', False) and SOFASCORE_CLIENT and SOFASCORE_CLIENT.service:
-                    xg_stats = get_match_xg_and_stats(match, SOFASCORE_CLIENT.service)
-            except Exception as e:
-                logger.warning(f"Could not extract stats for {match_name}: {e}")
-                current_corners = 0
-                xg_stats = {'has_xg_data': False}
-
-            # --- LOG ALL STATS ---
-            home_xg = xg_stats.get('home_xg', 0)
-            away_xg = xg_stats.get('away_xg', 0)
-            total_xg = xg_stats.get('total_xg', 0)
-
-            log_corner_data(match_name, current_corners, live_pitch_minute, league, country, is_trigger=True)
-            log_match_stats(match_name, xg_stats, live_pitch_minute, league, country)
-
-            # --- Apply xG Filters (with fallback) ---
-            xg_passed, xg_reason, used_fallback = check_xg_filters(xg_stats)
-
-            # Log xG result
-            log_xg_data(match_name, home_xg, away_xg, total_xg, live_pitch_minute, league, country,
-                       passed_filters=xg_passed, fallback=used_fallback)
-
-            if not xg_passed:
-                logger.info(f"⏭️ {match_name} - xG filter failed: {xg_reason}")
-                stats_logger.info(f"FILTERED | {match_name} | {xg_reason}")
-                state['bet_placed'] = True
-                LOCAL_TRACKED_MATCHES[fid] = state
-                return
-
-            # --- Apply Advanced Filters (with leniency for missing data) ---
-            has_xg_data = xg_stats.get('has_xg_data', False)
-            advanced_passed, advanced_reason = check_advanced_filters(xg_stats, current_corners, has_xg_data)
-
-            if not advanced_passed:
-                logger.info(f"⏭️ {match_name} - Advanced filter failed: {advanced_reason}")
-                stats_logger.info(f"FILTERED | {match_name} | {advanced_reason}")
-                state['bet_placed'] = True
-                LOCAL_TRACKED_MATCHES[fid] = state
-                return
-
-            # --- Log that filters passed ---
-            filter_status = "FALLBACK" if used_fallback else "xG"
-            stats_logger.info(f"FILTERS PASSED ({filter_status}) | {match_name} | {xg_reason} | Corners: {current_corners}")
+            # --- LOG STATS ---
+            log_match_stats(match_name, live_pitch_minute, league, country)
 
             if firebase_manager.is_state_locked():
                 STATE_LOCKS.inc()
                 logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
             else:
-                logger.info(f"⚡ QUALIFIED: 0-0 at {live_pitch_minute}' with {current_corners} corners - Firing parlay placement routine for {match_name}")
+                logger.info(f"⚡ QUALIFIED: 0-0 at {live_pitch_minute}' - Firing bet placement routine for {match_name}")
                 stake, seq = calculate_stake()
 
                 flag_emoji = COUNTRY_FLAGS.get(country_slug.lower(), COUNTRY_FLAGS.get(country.lower(), "🌍"))
@@ -846,12 +444,6 @@ def process_match(match):
                 if _staking_engine:
                     step_display = f" | Step {_staking_engine.current_step + 1}/{len(STAKE_SEQUENCE)}"
 
-                # Build filter info for display
-                if used_fallback:
-                    filter_info = f"FALLBACK: SOT H={xg_stats.get('home_shots_on_target', 0)}, A={xg_stats.get('away_shots_on_target', 0)} | Corners: {current_corners}"
-                else:
-                    filter_info = f"xG: H={home_xg:.2f}, A={away_xg:.2f} | Shots OT: {xg_stats.get('home_shots_on_target', 0)}-{xg_stats.get('away_shots_on_target', 0)} | Corners: {current_corners}"
-
                 data = {
                     'match_name': match_name,
                     'league': league,
@@ -859,17 +451,10 @@ def process_match(match):
                     'country_slug': country_slug,
                     'trigger_minute': live_pitch_minute,
                     'trigger_score': score,
-                    'current_corners': current_corners,
-                    'home_xg': home_xg,
-                    'away_xg': away_xg,
-                    'total_xg': total_xg,
-                    'shots_on_target': f"{xg_stats.get('home_shots_on_target', 0)}-{xg_stats.get('away_shots_on_target', 0)}",
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'parlay_over0.5_corners',
+                    'bet_type': 'over0.5_goals',
                     'data_source': 'livescore',
-                    'xg_filter_passed': True,
-                    'used_fallback': used_fallback,
                     'staking_step': _staking_engine.current_step + 1 if _staking_engine else 0,
                     'staking_sequence': STAKE_SEQUENCE if _staking_engine else [],
                 }
@@ -877,13 +462,10 @@ def process_match(match):
                 BET_TRIGGERS.inc()
 
                 send_telegram(
-                    f"🎯 **PARLAY BET PLACED - OVER 0.5 GOALS + OVER {current_corners} CORNERS**\n"
+                    f"🎯 **BET PLACED - OVER 0.5 GOALS**\n"
                     f"⏱ Min: {live_pitch_minute}' | {match_name}\n"
                     f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score} (Betting on: ANY goal + at least 1 more corner)\n"
-                    f"🔄 Current Corners: {current_corners} (Need +1 corner)\n"
-                    f"📊 {filter_info}\n"
-                    f"{'⚠️ Using fallback metrics (xG unavailable)' if used_fallback else ''}\n"
+                    f"🔢 Score: {score} (Betting on: ANY goal)\n"
                     f"💰 Stake: ${stake:.2f}{step_display}"
                 )
         else:
@@ -897,27 +479,9 @@ def process_match(match):
         unresolved = firebase_manager.get_unresolved_bet(fid)
         if unresolved:
             trigger_score = unresolved.get('trigger_score', '0-0')
-            trigger_corners = unresolved.get('current_corners', 0)
-            trigger_home_xg = unresolved.get('home_xg', 0)
-            trigger_away_xg = unresolved.get('away_xg', 0)
-            used_fallback = unresolved.get('used_fallback', False)
-
-            final_corners = 0
-            try:
-                if isinstance(match, dict):
-                    final_corners = extract_livescore_corners(match)
-
-                if final_corners == 0 and SOFASCORE_CLIENT and SOFASCORE_CLIENT.service:
-                    final_corners = extract_livescore_corners_from_match(match, SOFASCORE_CLIENT.service)
-            except Exception as e:
-                logger.warning(f"Could not extract final corners for {match_name}: {e}")
-                final_corners = trigger_corners
-
-            log_corner_data(match_name, final_corners, 45, league, country, is_final=True)
 
             goal_scored = (score != '0-0')
-            corner_increased = (final_corners > trigger_corners)
-            outcome = 'win' if (goal_scored and corner_increased) else 'loss'
+            outcome = 'win' if goal_scored else 'loss'
 
             if goal_scored:
                 log_goal_data(match_name, score, 45, league, country)
@@ -926,8 +490,7 @@ def process_match(match):
 
             stats_logger.info(
                 f"BET_OUTCOME | {match_name} | {outcome.upper()} | "
-                f"Score: {score} | Corners: {trigger_corners}→{final_corners} | "
-                f"Goal: {'YES' if goal_scored else 'NO'} | Corner Inc: {'YES' if corner_increased else 'NO'}"
+                f"Score: {score} | Goal: {'YES' if goal_scored else 'NO'}"
             )
 
             db_league = unresolved.get('league', league)
@@ -947,13 +510,8 @@ def process_match(match):
                     'score': score,
                     'trigger_score': trigger_score,
                     'trigger_minute': trigger_minute,
-                    'trigger_corners': trigger_corners,
-                    'final_corners': final_corners,
-                    'trigger_home_xg': trigger_home_xg,
-                    'trigger_away_xg': trigger_away_xg,
                     'stake': stake,
-                    'bet_type': 'parlay_over0.5_corners',
-                    'used_fallback': used_fallback,
+                    'bet_type': 'over0.5_goals',
                 }
                 result = _staking_engine.record_result(is_win, match_info)
 
@@ -968,22 +526,14 @@ def process_match(match):
             firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
             goal_status = "✅ Goal scored" if goal_scored else "❌ No goal"
-            corner_status = f"✅ Corners increased ({trigger_corners} → {final_corners})" if corner_increased else f"❌ No corner increase ({trigger_corners} → {final_corners})"
-
-            xg_info = ""
-            if trigger_home_xg > 0 or trigger_away_xg > 0:
-                xg_info = f"\n📊 xG at bet: H={trigger_home_xg:.2f}, A={trigger_away_xg:.2f}"
-            elif used_fallback:
-                xg_info = "\n📊 Used fallback metrics (xG unavailable)"
 
             send_telegram(
-                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Parlay (Over 0.5 + Corners)**\n"
+                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Over 0.5 Goals**\n"
                 f"⏱ HT (45') | {match_name}\n"
                 f"{flag_emoji} {db_country} | 🏆 {db_league}\n"
                 f"🔢 Final HT Score: {score} (Started 0-0 at {trigger_minute}')\n"
-                f"🔄 Corners: {trigger_corners} → {final_corners} (Need +1){xg_info}\n"
                 f"💰 Stake: ${stake:.2f}{step_display}{bankroll_display}{profit_display}\n"
-                f"📊 {goal_status} | {corner_status}"
+                f"📊 {goal_status}"
             )
             LOCAL_TRACKED_MATCHES.pop(fid, None)
 
@@ -1007,15 +557,7 @@ def initialize_bot_services() -> bool:
         else:
             logger.info("📊 Staking Engine not attached. Using fixed stake.")
 
-        logger.info(f"📊 xG Filters: Max Home={XG_THRESHOLDS['max_home_xg']}, Max Away={XG_THRESHOLDS['max_away_xg']}, "
-                   f"Max Total={XG_THRESHOLDS['max_total_xg']}, Min Total={XG_THRESHOLDS['min_total_xg']}")
-        logger.info(f"📊 Fallback Filters: Enabled={FALLBACK_FILTERS['use_fallback_when_no_xg']}, "
-                   f"Min SOT={FALLBACK_FILTERS['min_shots_on_target_fallback']}")
-        logger.info(f"📊 Advanced Filters: Min SOT={ADVANCED_FILTERS['min_shots_on_target']}, "
-                   f"Min Total Shots={ADVANCED_FILTERS['min_total_shots']}, "
-                   f"Corners Range={ADVANCED_FILTERS['min_corners_for_bet']}-{ADVANCED_FILTERS['max_corners_for_bet']}")
-
-        logger.info("📝 Data logging enabled: goals.log, xg.log, corners.log, match_stats.log")
+        logger.info("📝 Data logging enabled: goals.log, match_stats.log")
 
         return True
     except Exception as e:
@@ -1073,10 +615,9 @@ def main():
     ╔═══════════════════════════════════════════════════════════════════╗
     ║                                                                   ║
     ║     🎯 BETBOT - Live Match Betting Engine                        ║
-    ║     Strategy: Parlay - Over 0.5 Goals + Over Corners             ║
+    ║     Strategy: Over 0.5 Goals                                     ║
     ║     Check: 25 minutes | Score: 0-0                              ║
-    ║     Filters: xG (with fallback to Shots on Target)              ║
-    ║     Data Logging: goals.log, xg.log, corners.log, stats.log     ║
+    ║     Data Logging: goals.log, match_stats.log                    ║
     ║                                                                   ║
     ╚═══════════════════════════════════════════════════════════════════╝
     """)
@@ -1094,13 +635,9 @@ def main():
     send_telegram(
         "🤖 **BetBot Started**\n"
         f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "📊 Strategy: Parlay (Over 0.5 Goals + Over Corners)\n"
+        "📊 Strategy: Over 0.5 Goals\n"
         "⏱ Check: 25 minutes | Score: 0-0\n"
-        f"💰 Bankroll: ${initial_bankroll:.2f}\n"
-        "📊 Filters:\n"
-        f"  • xG: H≤{XG_THRESHOLDS['max_home_xg']}, A≤{XG_THRESHOLDS['max_away_xg']}, Total {XG_THRESHOLDS['min_total_xg']}-{XG_THRESHOLDS['max_total_xg']}\n"
-        f"  • Fallback (when no xG): SOT ≥{FALLBACK_FILTERS['min_shots_on_target_fallback']} each\n"
-        f"  • Corners: {ADVANCED_FILTERS['min_corners_for_bet']}-{ADVANCED_FILTERS['max_corners_for_bet']}"
+        f"💰 Bankroll: ${initial_bankroll:.2f}"
     )
 
     cycle_count = 0
