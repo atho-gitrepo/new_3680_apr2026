@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
 """
-BetBot - Live Match Betting Engine
-Strategy: Over 0.5 Goals at 25 minutes (0-0)
+Core business strategy processing engine.
+Evaluates live match metrics against staking parameters and logs execution telemetry.
+Hybrid version engineered to parse both object-oriented feeds and dictionary-based LiveScore payloads.
+INTEGRATED WITH: Dynamic Percentage Staking Engine (10, 15, 25, 40, 60, 90)
+MODIFIED FOR: Over 0.5 Goals strategy at 25 minutes with 0-0 score
 """
 
 import requests
@@ -9,10 +11,8 @@ import os
 import json
 import time
 import logging
-import sys
-import signal
 from datetime import datetime, timezone
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any
 import firebase_admin
 from firebase_admin import credentials, firestore
 from esd.sofascore import SofascoreClient
@@ -31,43 +31,20 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 
 # ============================================================
-# LOGGING CONFIGURATION
-# ============================================================
-goal_logger = logging.getLogger("BetBot.Goals")
-stats_logger = logging.getLogger("BetBot.Stats")
-
-def setup_data_loggers():
-    """Setup separate log files for different data types."""
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-
-    goal_handler = logging.FileHandler(f"{log_dir}/goals.log")
-    goal_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    goal_logger.addHandler(goal_handler)
-    goal_logger.setLevel(logging.INFO)
-
-    stats_handler = logging.FileHandler(f"{log_dir}/match_stats.log")
-    stats_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    stats_logger.addHandler(stats_handler)
-    stats_logger.setLevel(logging.INFO)
-
-# ============================================================
 # STAKING ENGINE CONFIGURATION
 # ============================================================
+# These are now managed by the staking engine
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 3
 
-# Timing parameters - Check at 25 minutes for 0-0 matches
-MINUTES_REGULAR_BET = [25]
-SLEEP_TIME = 55
+# Timing parameters - MODIFIED FOR OVER 0.5 GOALS STRATEGY
+MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Over 0.5 Goals
+SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
-# ============================================================
-# FILTER CONFIGURATION
-# ============================================================
 AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
 
-PREDICT_START_MIN = 24
-PRE_WARM_WINDOW = (23, 27)
+PREDICT_START_MIN = 20  # Start checking from 20 minutes (modified from 30)
+PRE_WARM_WINDOW = (23, 27)  # Pre-warm window for 25-minute mark (modified from 34, 38)
 MEMORY_PRUNE_TIMEOUT = 5400
 
 # --- VOLATILE MEMORY CACHE MAP ---
@@ -75,7 +52,7 @@ LOCAL_TRACKED_MATCHES = {}
 
 # --- GLOBAL STAKING ENGINE INSTANCE ---
 _staking_engine: Optional[StakingEngine] = None
-_staking_enabled: bool = True
+_staking_enabled: bool = True  # Set to False to disable staking engine and use fixed stake
 
 # --- FIXED GEOGRAPHICAL FLAG MAP ---
 COUNTRY_FLAGS = {
@@ -91,33 +68,29 @@ COUNTRY_FLAGS = {
     "egypt": "🇪🇬", "nigeria": "🇳🇬", "south africa": "🇿🇦", "chile": "🇨🇱",
     "colombia": "🇨🇴", "peru": "🇵🇪", "uruguay": "🇺🇾", "paraguay": "🇵🇾",
     "ecuador": "🇪🇨", "venezuela": "🇻🇪", "bolivia": "🇧🇴", "costarica": "🇨🇷",
-    "finland": "🇫🇮", "world": "🌍"
+    "finland": "🇫🇮", "world": "🌍", "turkiye": "🇹🇷"
 }
-
-# =========================
-# LOGGING HELPER FUNCTIONS
-# =========================
-
-def log_goal_data(match_name: str, score: str, minute: int, league: str, country: str):
-    goal_logger.info(f"GOAL | {match_name} | {score} | {minute}' | {league} | {country}")
-
-def log_match_stats(match_name: str, minute: int, league: str, country: str):
-    stats_logger.info(f"STATS | {match_name} | {minute}' | {league} | {country}")
 
 # =========================
 # STAKING ENGINE MANAGEMENT
 # =========================
 
 def set_staking_engine(engine: StakingEngine) -> None:
+    """
+    Set the staking engine instance for use in the bot.
+    Called by main.py during initialization.
+    """
     global _staking_engine
     _staking_engine = engine
     logger.info(f"✅ Staking Engine attached to bot.")
     logger.info(f"📊 Sequence: {STAKE_SEQUENCE}")
 
 def get_staking_engine() -> Optional[StakingEngine]:
+    """Get the current staking engine instance."""
     return _staking_engine
 
 def enable_staking(enable: bool = True) -> None:
+    """Enable or disable the staking engine."""
     global _staking_enabled
     _staking_enabled = enable
     status = "enabled" if enable else "disabled"
@@ -125,6 +98,7 @@ def enable_staking(enable: bool = True) -> None:
     send_telegram(f"📊 Staking engine {status}.")
 
 def get_staking_stats() -> Dict:
+    """Get current staking statistics from the engine."""
     if _staking_engine:
         return _staking_engine.get_stats()
     return {
@@ -148,6 +122,7 @@ def get_staking_stats() -> Dict:
     }
 
 def reset_staking_engine() -> None:
+    """Reset the staking engine to initial state."""
     global _staking_engine
     if _staking_engine:
         _staking_engine.reset()
@@ -155,16 +130,39 @@ def reset_staking_engine() -> None:
         send_telegram("🔄 Staking engine reset to initial state.")
 
 def get_staking_status_message() -> str:
+    """Generate a formatted status message for the staking engine."""
     if _staking_engine:
         return _staking_engine.get_status_message()
     return "⚠️ Staking engine not initialized."
 
 def get_current_stake() -> float:
+    """
+    Get the current stake from the staking engine.
+    If staking is disabled or engine not available, returns ORIGINAL_STAKE.
+    Returns 0 if paused.
+    """
     if not _staking_enabled or not _staking_engine:
         return ORIGINAL_STAKE
-    return _staking_engine.get_current_stake()
+    
+    stake = _staking_engine.get_current_stake()
+    # If paused (stake = 0), fall back to ORIGINAL_STAKE
+    if stake == 0:
+        logger.info("⏸️ Staking engine paused. Using original stake.")
+        return ORIGINAL_STAKE
+    
+    return float(stake)
+
+def get_current_step() -> int:
+    """Get the current step from the staking engine."""
+    if _staking_engine:
+        return _staking_engine.current_step
+    return 0
 
 def record_bet_result(is_win: bool, match_info: Optional[Dict] = None) -> Optional[Dict]:
+    """
+    Record a bet result in the staking engine.
+    Returns the result dictionary from the engine.
+    """
     if _staking_engine:
         return _staking_engine.record_result(is_win, match_info)
     return None
@@ -275,17 +273,31 @@ def send_telegram(msg: str):
     except Exception as e:
         logger.error(f"❌ Network error sending Telegram webhook event: {e}")
 
+# ============================================================
+# FIXED: calculate_stake() - Now correctly uses Staking Engine
+# ============================================================
+
 def calculate_stake() -> tuple[float, int]:
+    """
+    Calculate the stake using the Dynamic Percentage staking engine.
+    Returns (stake, sequence_number) for compatibility with existing code.
+    """
     global _staking_engine, _staking_enabled
 
+    # If staking engine is enabled, use it
     if _staking_enabled and _staking_engine:
         stake = _staking_engine.get_current_stake()
+        
+        # If paused (stake = 0), fall back to ORIGINAL_STAKE
         if stake == 0:
             logger.info("⏸️ Staking engine paused. Using original stake.")
             return ORIGINAL_STAKE, 1
+        
+        # Get the current step for sequence tracking (step + 1 for display)
         step = _staking_engine.current_step + 1
         return float(stake), step
 
+    # Fallback: Use original stake (backward compatibility)
     last = firebase_manager.get_last_resolved_bet()
     if not last or last.get('outcome') == 'win':
         return ORIGINAL_STAKE, 1
@@ -313,14 +325,23 @@ def prune_volatile_cache_leaks():
 # ==========================================
 
 def extract_hybrid_geography(match) -> tuple[str, str, str]:
+    """
+    Resolves league and country data structures across both
+    Sofascore object types and LiveScore payload mappings.
+    Returns: (league_name, country_name, country_slug)
+    """
+    # 1. Handle object-oriented payload formats (Sofascore)
     if hasattr(match, 'tournament'):
         league = match.tournament.name
         country_name = match.tournament.category.name if match.tournament.category else "World"
         country_slug = getattr(match.tournament.category, 'slug', country_name.lower())
         return league, country_name, country_slug
 
+    # 2. Handle structural dictionary payload formats (LiveScore)
     if isinstance(match, dict):
         tournament_name = "Unknown League"
+
+        # Try Stg (Stage) data first
         if "Stg" in match and isinstance(match["Stg"], dict):
             stage = match["Stg"]
             tournament_name = (
@@ -329,6 +350,7 @@ def extract_hybrid_geography(match) -> tuple[str, str, str]:
                 stage.get("Nm") or
                 "Unknown League"
             )
+
             if tournament_name == "Unknown League":
                 tournament_name = match.get("Snm") or match.get("CompN") or "Unknown League"
 
@@ -367,12 +389,11 @@ def extract_hybrid_geography(match) -> tuple[str, str, str]:
     return "Unknown League", "World", "world"
 
 # =========================
-# CORE EVALUATION PIPELINE
+# CORE EVALUATION PIPELINE - MODIFIED FOR OVER 0.5 GOALS
 # =========================
 
 def process_match(match):
-    global SOFASCORE_CLIENT
-
+    # Safe fallback lookup for Unique IDs and Match Titles
     fid = str(match.id) if hasattr(match, 'id') else str(match.get('match_id') or match.get('id') or match.get('Eid', ''))
 
     if hasattr(match, 'home_team'):
@@ -403,7 +424,7 @@ def process_match(match):
             is_first_half_phase = True
     elif status in ['HT', 'HALFTIME', 'HALF']:
         live_pitch_minute = 45
-        is_first_half_phase = True
+        is_first_half_phase = False  # HT is resolution time, not betting time
     elif '1ST' in status:
         is_first_half_phase = True
         live_pitch_minute = getattr(match, 'total_elapsed_minutes', match.get('total_elapsed_minutes', 25))
@@ -425,73 +446,72 @@ def process_match(match):
 
     LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 1: EVALUATE PLACEMENT - Check for 0-0 at 25 minutes ---
-    if is_first_half_phase and (live_pitch_minute in MINUTES_REGULAR_BET) and not state['bet_placed']:
-        if score == '0-0':
-            # --- LOG STATS ---
-            log_match_stats(match_name, live_pitch_minute, league, country)
-
-            if firebase_manager.is_state_locked():
-                STATE_LOCKS.inc()
-                logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
-            else:
-                logger.info(f"⚡ QUALIFIED: 0-0 at {live_pitch_minute}' - Firing bet placement routine for {match_name}")
+    # --- PHASE 1: EVALUATE PLACEMENT - OVER 0.5 GOALS AT 25 MINUTES ---
+    # Check if at 25 minutes, score is 0-0, and bet not placed yet
+    if is_first_half_phase and (live_pitch_minute == 25) and not state['bet_placed']:
+        if firebase_manager.is_state_locked():
+            STATE_LOCKS.inc()
+            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
+        else:
+            # For Over 0.5 Goals, we bet when score is 0-0 at 25 minutes
+            if score == '0-0':
+                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at 25' with score {score} (Over 0.5 Goals)")
+                
+                # Get stake and step from staking engine
                 stake, seq = calculate_stake()
-
+                
+                # Get current step for display
+                current_step = _staking_engine.current_step if _staking_engine else 0
+                
                 flag_emoji = COUNTRY_FLAGS.get(country_slug.lower(), COUNTRY_FLAGS.get(country.lower(), "🌍"))
 
                 step_display = ""
                 if _staking_engine:
-                    step_display = f" | Step {_staking_engine.current_step + 1}/{len(STAKE_SEQUENCE)}"
+                    step_display = f" | Step {current_step + 1}/{len(STAKE_SEQUENCE)}"
 
                 data = {
                     'match_name': match_name,
                     'league': league,
                     'country': country,
                     'country_slug': country_slug,
-                    'trigger_minute': live_pitch_minute,
-                    'trigger_score': score,
+                    'bet_time': '25_minutes',
+                    'score_at_bet': score,
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'over0.5_goals',
-                    'data_source': 'livescore',
-                    'staking_step': _staking_engine.current_step + 1 if _staking_engine else 0,
+                    'bet_type': 'over_0.5_goals',
+                    'staking_step': current_step + 1 if _staking_engine else 0,
                     'staking_sequence': STAKE_SEQUENCE if _staking_engine else [],
                 }
                 firebase_manager.add_unresolved_bet(fid, data)
                 BET_TRIGGERS.inc()
 
+                # Enhanced clean Telegram string notification alert layout
                 send_telegram(
-                    f"🎯 **BET PLACED - OVER 0.5 GOALS**\n"
-                    f"⏱ Min: {live_pitch_minute}' | {match_name}\n"
+                    f"🎯 **BET PLACED - Over 0.5 Goals (Match {seq})**\n"
+                    f"⏱ 25' | {match_name}\n"
                     f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score} (Betting on: ANY goal)\n"
+                    f"🔢 Score: {score} (Waiting for Over 0.5 Goals)\n"
                     f"💰 Stake: ${stake:.2f}{step_display}"
                 )
-        else:
-            logger.debug(f"⏭️ Match {match_name} at {live_pitch_minute}' has score {score}, not 0-0. Skipping.")
 
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 2: HALFTIME RESOLUTION ---
+    # --- PHASE 2: HALFTIME RESOLUTION - CHECK FOR GOALS ---
     elif status in ['HT', 'HALFTIME', 'HALF']:
         unresolved = firebase_manager.get_unresolved_bet(fid)
         if unresolved:
-            trigger_score = unresolved.get('trigger_score', '0-0')
-
-            goal_scored = (score != '0-0')
-            outcome = 'win' if goal_scored else 'loss'
-
-            if goal_scored:
-                log_goal_data(match_name, score, 45, league, country)
-            else:
-                stats_logger.info(f"NO_GOAL | {match_name} | {score} | 45' | {league} | {country}")
-
-            stats_logger.info(
-                f"BET_OUTCOME | {match_name} | {outcome.upper()} | "
-                f"Score: {score} | Goal: {'YES' if goal_scored else 'NO'}"
-            )
+            # For Over 0.5 Goals, win if there's at least 1 goal at halftime
+            # Score format is "home-away", e.g., "1-0", "1-1", etc.
+            try:
+                home_score, away_score = map(int, score.split('-'))
+                total_goals = home_score + away_score
+                outcome = 'win' if total_goals >= 1 else 'loss'
+                goals_display = f"{total_goals} goal{'s' if total_goals != 1 else ''}"
+            except (ValueError, AttributeError):
+                # If score parsing fails, check if score is not '0-0'
+                outcome = 'win' if score != '0-0' else 'loss'
+                goals_display = 'unknown'
 
             db_league = unresolved.get('league', league)
             db_country = unresolved.get('country', country)
@@ -499,8 +519,8 @@ def process_match(match):
             flag_emoji = COUNTRY_FLAGS.get(db_slug.lower(), COUNTRY_FLAGS.get(db_country.lower(), "🌍"))
 
             stake = unresolved.get('stake', 0)
-            trigger_minute = unresolved.get('trigger_minute', 25)
 
+            # --- Record result in staking engine ---
             if _staking_engine:
                 is_win = (outcome == 'win')
                 match_info = {
@@ -508,56 +528,84 @@ def process_match(match):
                     'league': db_league,
                     'country': db_country,
                     'score': score,
-                    'trigger_score': trigger_score,
-                    'trigger_minute': trigger_minute,
+                    'total_goals': total_goals if 'total_goals' in locals() else 'unknown',
                     'stake': stake,
-                    'bet_type': 'over0.5_goals',
+                    'bet_type': 'over_0.5_goals'
                 }
                 result = _staking_engine.record_result(is_win, match_info)
-
-                step_display = _staking_engine.get_current_step_display()
+                
+                # Get updated staking engine status for the message
+                step_display = f"Step {_staking_engine.current_step + 1}/{len(STAKE_SEQUENCE)}"
+                
+                # Get the NEXT stake for display
+                next_stake = _staking_engine.get_current_stake()
+                if next_stake == 0:
+                    next_stake_display = "⏸️ PAUSED"
+                else:
+                    next_stake_display = f"Next: ${next_stake:.2f}"
+                
                 bankroll_display = f" | 💰 Bankroll: ${_staking_engine.current_bankroll:.2f}"
                 profit_display = f" | 📈 Profit: ${_staking_engine.total_profit:.2f}"
             else:
-                step_display = ""
+                step_display = f"Step {seq}/{len(STAKE_SEQUENCE)}" if seq else ""
+                next_stake_display = ""
                 bankroll_display = ""
                 profit_display = ""
 
             firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
-            goal_status = "✅ Goal scored" if goal_scored else "❌ No goal"
-
-            send_telegram(
+            # Build the result message with proper stake display
+            result_msg = (
                 f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Over 0.5 Goals**\n"
-                f"⏱ HT (45') | {match_name}\n"
+                f"⏱ 45' | {match_name}\n"
                 f"{flag_emoji} {db_country} | 🏆 {db_league}\n"
-                f"🔢 Final HT Score: {score} (Started 0-0 at {trigger_minute}')\n"
-                f"💰 Stake: ${stake:.2f}{step_display}{bankroll_display}{profit_display}\n"
-                f"📊 {goal_status}"
+                f"🔢 Score: {score} | {'✅ Goal scored' if outcome == 'win' else '❌ No goals'}"
             )
+            
+            if outcome == 'win' and 'total_goals' in locals():
+                result_msg += f" ({goals_display})"
+            
+            result_msg += f"\n💰 Stake: ${stake:.2f}"
+            
+            if step_display:
+                result_msg += f" | {step_display}"
+            
+            if _staking_engine and _staking_engine.is_paused:
+                pause_remaining = int(_staking_engine.pause_until - time.time())
+                if pause_remaining > 0:
+                    minutes = pause_remaining // 60
+                    seconds = pause_remaining % 60
+                    result_msg += f" | ⏸️ PAUSED for {minutes}m {seconds}s"
+            
+            if bankroll_display:
+                result_msg += bankroll_display
+            if profit_display:
+                result_msg += profit_display
+
+            send_telegram(result_msg)
             LOCAL_TRACKED_MATCHES.pop(fid, None)
 
 # =========================
 # DRIVER LAYER INTERFACES
 # =========================
 
+# Initialize global Firebase manager
+firebase_manager = None
+SOFASCORE_CLIENT = None
+
 def initialize_bot_services() -> bool:
     global firebase_manager, SOFASCORE_CLIENT
-
-    setup_data_loggers()
-
     firebase_manager = FirebaseManager(FIREBASE_CREDENTIALS)
     try:
         SOFASCORE_CLIENT = SofascoreClient()
         SOFASCORE_CLIENT.initialize()
 
+        # Log staking engine status
         if _staking_engine:
             logger.info(f"📊 Staking Engine active: {_staking_engine.get_current_step_display()}")
             logger.info(f"📊 Sequence: {STAKE_SEQUENCE}")
         else:
             logger.info("📊 Staking Engine not attached. Using fixed stake.")
-
-        logger.info("📝 Data logging enabled: goals.log, match_stats.log")
 
         return True
     except Exception as e:
@@ -589,79 +637,3 @@ def run_bot_cycle():
         prune_volatile_cache_leaks()
     except Exception as e:
         logger.error(f"Ingestion lifecycle exception: {e}")
-
-# =========================
-# MAIN ENTRY POINT
-# =========================
-
-def signal_handler(sig, frame):
-    logger.info(f"Received signal {sig}, shutting down...")
-    sys.exit(0)
-
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('betbot.log')
-        ]
-    )
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    print("""
-    ╔═══════════════════════════════════════════════════════════════════╗
-    ║                                                                   ║
-    ║     🎯 BETBOT - Live Match Betting Engine                        ║
-    ║     Strategy: Over 0.5 Goals                                     ║
-    ║     Check: 25 minutes | Score: 0-0                              ║
-    ║     Data Logging: goals.log, match_stats.log                    ║
-    ║                                                                   ║
-    ╚═══════════════════════════════════════════════════════════════════╝
-    """)
-
-    initial_bankroll = float(os.getenv('INITIAL_BANKROLL', '1000.0'))
-    staking_engine = StakingEngine(initial_bankroll=initial_bankroll)
-    set_staking_engine(staking_engine)
-
-    if not initialize_bot_services():
-        logger.error("❌ Failed to initialize bot services. Exiting.")
-        sys.exit(1)
-
-    logger.info("✅ Bot services initialized successfully.")
-
-    send_telegram(
-        "🤖 **BetBot Started**\n"
-        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "📊 Strategy: Over 0.5 Goals\n"
-        "⏱ Check: 25 minutes | Score: 0-0\n"
-        f"💰 Bankroll: ${initial_bankroll:.2f}"
-    )
-
-    cycle_count = 0
-    sleep_interval = int(os.getenv('BOT_SLEEP_INTERVAL', '60'))
-
-    try:
-        while True:
-            cycle_count += 1
-            logger.info(f"🔄 Running cycle #{cycle_count} at {datetime.now().strftime('%H:%M:%S')}")
-            run_bot_cycle()
-
-            if cycle_count % 10 == 0:
-                stats = get_staking_stats()
-                logger.info(f"📊 Staking Stats: Bankroll=${stats['current_bankroll']}, "
-                          f"Profit=${stats['total_profit']}, "
-                          f"Win Rate={stats['win_rate']}")
-
-            time.sleep(sleep_interval)
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, shutting down...")
-    finally:
-        shutdown_bot()
-        send_telegram(f"🛑 BetBot stopped after {cycle_count} cycles.")
-        logger.info("👋 BetBot stopped successfully.")
-
-if __name__ == "__main__":
-    main()
