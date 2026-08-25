@@ -4,6 +4,7 @@ Evaluates live match metrics against staking parameters and logs execution telem
 Hybrid version engineered to parse both object-oriented feeds and dictionary-based LiveScore payloads.
 INTEGRATED WITH: Dynamic Percentage Staking Engine (10, 15, 25, 40, 60, 90)
 MODIFIED FOR: Over 0.5 Goals strategy at 25 minutes with 0-0 score
+USING: Separate Firebase collections (unresolved_bets_ov0.5, resolved_bets_ov0.5)
 """
 
 import requests
@@ -168,13 +169,15 @@ def record_bet_result(is_win: bool, match_info: Optional[Dict] = None) -> Option
     return None
 
 # =========================
-# FIREBASE CONFIGURATION
+# FIREBASE CONFIGURATION - OVER 0.5 GOALS SPECIFIC
 # =========================
 
 class FirebaseManager:
     def __init__(self, creds_json):
         self.creds_json = creds_json
         self.db = None
+        self.unresolved_collection = 'unresolved_bets_ov0.5'
+        self.resolved_collection = 'resolved_bets_ov0.5'
         self._connect()
 
     def _connect(self):
@@ -187,7 +190,8 @@ class FirebaseManager:
             if not firebase_admin._apps:
                 firebase_admin.initialize_app(cred)
             self.db = firestore.client()
-            logger.info("✅ Firebase Connection Successfully Established.")
+            logger.info(f"✅ Firebase Connection Successfully Established.")
+            logger.info(f"📁 Using collections: '{self.unresolved_collection}' and '{self.resolved_collection}'")
             return True
         except Exception as e:
             logger.exception(f"❌ Firebase Initialization Error: {e}")
@@ -200,20 +204,22 @@ class FirebaseManager:
         return self._connect()
 
     def is_state_locked(self) -> bool:
+        """Check if there are any unresolved bets in the Over 0.5 collection."""
         if not self._ensure_connection():
             return True
         try:
-            unresolved_docs = self.db.collection('unresolved_bets').limit(1).get()
+            unresolved_docs = self.db.collection(self.unresolved_collection).limit(1).get()
             return len(unresolved_docs) > 0
         except Exception as e:
             logger.error(f"❌ Error checking Firebase state lock: {e}")
             return True
 
     def get_last_resolved_bet(self) -> dict | None:
+        """Get the last resolved bet from the Over 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
-            query = self.db.collection('resolved_bets')\
+            query = self.db.collection(self.resolved_collection)\
                 .order_by('resolution_timestamp', direction=firestore.Query.DESCENDING)\
                 .limit(1).get()
             for doc in query:
@@ -224,43 +230,121 @@ class FirebaseManager:
             return None
 
     def add_unresolved_bet(self, match_id: str, data: dict):
+        """Add an unresolved bet to the Over 0.5 collection."""
         placed_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data['placed_at'] = placed_time
+        data['collection'] = 'over_0.5_goals'  # Tag for identification
         if not self._ensure_connection():
             logger.critical(f"❌ Transmit Blocked: Database offline. Drop ID {match_id}!")
             return
         try:
-            self.db.collection('unresolved_bets').document(str(match_id)).set(data)
-            logger.info(f"✅ Document successfully written to 'unresolved_bets' for ID {match_id}")
+            self.db.collection(self.unresolved_collection).document(str(match_id)).set(data)
+            logger.info(f"✅ Document successfully written to '{self.unresolved_collection}' for ID {match_id}")
         except Exception as e:
             logger.exception(f"❌ Critical: Failed to save unresolved bet for ID {match_id}: {e}")
 
     def get_unresolved_bet(self, match_id: str) -> dict | None:
+        """Get an unresolved bet from the Over 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
-            doc = self.db.collection('unresolved_bets').document(str(match_id)).get()
+            doc = self.db.collection(self.unresolved_collection).document(str(match_id)).get()
             return doc.to_dict() if doc.exists else None
         except Exception as e:
             logger.error(f"❌ Error downloading unresolved document {match_id}: {e}")
             return None
 
     def move_to_resolved(self, match_id: str, data: dict, outcome: str) -> bool:
+        """Move a bet from unresolved to resolved in the Over 0.5 collections."""
         resolved_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data.update({
             'outcome': outcome,
             'resolved_at': resolved_time,
-            'resolution_timestamp': firestore.SERVER_TIMESTAMP
+            'resolution_timestamp': firestore.SERVER_TIMESTAMP,
+            'collection': 'over_0.5_goals'
         })
         if not self._ensure_connection():
             return False
         try:
-            self.db.collection('resolved_bets').document(str(match_id)).set(data)
-            self.db.collection('unresolved_bets').document(str(match_id)).delete()
+            # Add to resolved collection
+            self.db.collection(self.resolved_collection).document(str(match_id)).set(data)
+            # Delete from unresolved collection
+            self.db.collection(self.unresolved_collection).document(str(match_id)).delete()
+            logger.info(f"✅ Bet moved to '{self.resolved_collection}' for ID {match_id}")
             return True
         except Exception as e:
             logger.exception(f"❌ Error during database migration lifecycle for Match ID {match_id}: {e}")
             return False
+
+    def get_all_unresolved_bets(self) -> List[Dict]:
+        """Get all unresolved bets from the Over 0.5 collection."""
+        if not self._ensure_connection():
+            return []
+        try:
+            docs = self.db.collection(self.unresolved_collection).get()
+            return [doc.to_dict() for doc in docs]
+        except Exception as e:
+            logger.error(f"❌ Error getting unresolved bets: {e}")
+            return []
+
+    def get_all_resolved_bets(self, limit: int = 100) -> List[Dict]:
+        """Get resolved bets from the Over 0.5 collection."""
+        if not self._ensure_connection():
+            return []
+        try:
+            docs = self.db.collection(self.resolved_collection)\
+                .order_by('resolution_timestamp', direction=firestore.Query.DESCENDING)\
+                .limit(limit).get()
+            return [doc.to_dict() for doc in docs]
+        except Exception as e:
+            logger.error(f"❌ Error getting resolved bets: {e}")
+            return []
+
+    def get_statistics(self) -> Dict:
+        """Get statistics from the Over 0.5 collections."""
+        stats = {
+            'unresolved_count': 0,
+            'resolved_count': 0,
+            'wins': 0,
+            'losses': 0,
+            'win_rate': '0%',
+            'total_staked': 0.0,
+            'total_profit': 0.0
+        }
+        
+        if not self._ensure_connection():
+            return stats
+        
+        try:
+            # Count unresolved
+            unresolved_docs = self.db.collection(self.unresolved_collection).get()
+            stats['unresolved_count'] = len(unresolved_docs)
+            
+            # Get resolved bets
+            resolved_docs = self.db.collection(self.resolved_collection).get()
+            stats['resolved_count'] = len(resolved_docs)
+            
+            for doc in resolved_docs:
+                data = doc.to_dict()
+                if data.get('outcome') == 'win':
+                    stats['wins'] += 1
+                else:
+                    stats['losses'] += 1
+                stats['total_staked'] += data.get('stake', 0)
+                # Calculate profit (win returns stake * odds, but we'll track simple profit)
+                if data.get('outcome') == 'win':
+                    stats['total_profit'] += data.get('stake', 0) * 0.9  # Assuming 1.9 odds
+                else:
+                    stats['total_profit'] -= data.get('stake', 0)
+            
+            total = stats['wins'] + stats['losses']
+            if total > 0:
+                stats['win_rate'] = f"{(stats['wins'] / total * 100):.1f}%"
+            
+            return stats
+        except Exception as e:
+            logger.error(f"❌ Error getting statistics: {e}")
+            return stats
 
 # =========================
 # SYSTEM UTILITY AGENTS
@@ -451,7 +535,7 @@ def process_match(match):
     if is_first_half_phase and (live_pitch_minute == 25) and not state['bet_placed']:
         if firebase_manager.is_state_locked():
             STATE_LOCKS.inc()
-            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present.")
+            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present in unresolved_bets_ov0.5.")
         else:
             # For Over 0.5 Goals, we bet when score is 0-0 at 25 minutes
             if score == '0-0':
@@ -607,6 +691,11 @@ def initialize_bot_services() -> bool:
         else:
             logger.info("📊 Staking Engine not attached. Using fixed stake.")
 
+        # Log Firebase collections being used
+        logger.info(f"📁 Using Over 0.5 Goals collections:")
+        logger.info(f"   - Unresolved: {firebase_manager.unresolved_collection}")
+        logger.info(f"   - Resolved: {firebase_manager.resolved_collection}")
+
         return True
     except Exception as e:
         logger.exception(f"❌ Failed to instantiate data engine driver context: {e}")
@@ -637,3 +726,39 @@ def run_bot_cycle():
         prune_volatile_cache_leaks()
     except Exception as e:
         logger.error(f"Ingestion lifecycle exception: {e}")
+
+# =========================
+# ADDITIONAL UTILITY FUNCTIONS FOR OVER 0.5 GOALS
+# =========================
+
+def get_over0_5_statistics() -> Dict:
+    """
+    Get statistics specifically for the Over 0.5 Goals strategy.
+    """
+    if firebase_manager:
+        return firebase_manager.get_statistics()
+    return {
+        'unresolved_count': 0,
+        'resolved_count': 0,
+        'wins': 0,
+        'losses': 0,
+        'win_rate': '0%',
+        'total_staked': 0.0,
+        'total_profit': 0.0
+    }
+
+def get_active_over0_5_bets() -> List[Dict]:
+    """
+    Get all active (unresolved) Over 0.5 Goals bets.
+    """
+    if firebase_manager:
+        return firebase_manager.get_all_unresolved_bets()
+    return []
+
+def get_resolved_over0_5_bets(limit: int = 100) -> List[Dict]:
+    """
+    Get resolved Over 0.5 Goals bets.
+    """
+    if firebase_manager:
+        return firebase_manager.get_all_resolved_bets(limit)
+    return []
