@@ -32,11 +32,11 @@ logger = logging.getLogger("BetBot.Staking")
 # ============================================================
 
 # The Dynamic Percentage Sequence
-STAKE_SEQUENCE = [10, 15, 25, 40, 60, 90]
+STAKE_SEQUENCE = [10]
 
 # Safety thresholds
-MAX_CONSECUTIVE_LOSSES = 3
-PAUSE_DURATION = 3600  # 1 hour in seconds
+MAX_CONSECUTIVE_LOSSES = 7
+PAUSE_DURATION = 180  # 3mins in seconds
 
 # Bet odds (fixed at 1.45)
 ODDS = 2
