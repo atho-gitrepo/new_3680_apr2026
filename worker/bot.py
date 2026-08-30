@@ -42,7 +42,7 @@ MAX_CHASE_LEVEL = 3
 MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Over 0.5 Goals
 SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
-AMATEUR_KEYWORDS = ['amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
+AMATEUR_KEYWORDS = ['Austria','Iran','Mexico','Colombia','Argentina','amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
 
 PREDICT_START_MIN = 20  # Start checking from 20 minutes (modified from 30)
 PRE_WARM_WINDOW = (23, 27)  # Pre-warm window for 25-minute mark (modified from 34, 38)
