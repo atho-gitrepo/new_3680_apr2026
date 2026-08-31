@@ -80,7 +80,7 @@ EXCLUDED_COMBINATIONS: Set[Tuple[str, str]] = {
     ('Norway','1. Division'),
     ('Norway','2nd Division'),
     ('Norway','3rd Division'),
-    ('Ireland', 'Women's Premier Division'),
+    #('Ireland', 'Women's Premier Division'),
     ('Netherlands', 'Eredivisie'),
     ('Netherlands', 'Eerste Divisie'),
     ('Netherlands', 'Tweede Divisie'),
