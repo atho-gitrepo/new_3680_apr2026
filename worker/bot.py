@@ -2,9 +2,9 @@
 Core business strategy processing engine.
 Evaluates live match metrics against staking parameters and logs execution telemetry.
 Hybrid version engineered to parse both object-oriented feeds and dictionary-based LiveScore payloads.
-INTEGRATED WITH: Dynamic Percentage Staking Engine (10, 15, 25, 40, 60, 90)
-MODIFIED FOR: Over 0.5 Goals strategy at 25 minutes with 0-0 score
-USING: Separate Firebase collections (unresolved_bets_ov0.5, resolved_bets_ov0.5)
+INTEGRATED WITH:Flat Staking $10
+MODIFIED FOR: Under 0.5 Goals strategy at 25 minutes with 0-0 score
+USING: Separate Firebase collections (unresolved_bets_under0.5, resolved_bets_under0.5)
 """
 
 import requests
@@ -13,7 +13,7 @@ import json
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Set, Tuple
 import firebase_admin
 from firebase_admin import credentials, firestore
 from esd.sofascore import SofascoreClient
@@ -32,20 +32,77 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 
 # ============================================================
+# EXCLUDE FILTERS - Easy to configure
+# ============================================================
+# Add countries and leagues to exclude from betting
+# Format: Use exact names as they appear in the match data
+# 
+# Example: If a match shows "🇵🇱 Poland | 🏆 II Liga", you would add:
+#   EXCLUDED_COUNTRIES = {'Poland', 'Spain', 'Italy'}
+#   EXCLUDED_LEAGUES = {'II Liga', 'La Liga', 'Serie A'}
+#
+# To exclude combinations like "Poland - II Liga", use EXCLUDED_COMBINATIONS
+
+# Countries to exclude (exact match on country name)
+EXCLUDED_COUNTRIES: Set[str] = {
+    # Add countries to exclude here
+    # 'Brazil',
+    # 'Argentina',
+    # 'Mexico',
+    # 'Colombia',
+    # 'Austria',
+    # 'Iran',
+}
+
+# Leagues to exclude (exact match on league/tournament name)
+EXCLUDED_LEAGUES: Set[str] = {
+    # Add leagues to exclude here
+    # 'II Liga',
+    # 'La Liga',
+    # 'Serie A',
+    # 'Premier League',
+    # 'Bundesliga',
+}
+
+# Specific country + league combinations to exclude
+# Format: (country_name, league_name)
+EXCLUDED_COMBINATIONS: Set[Tuple[str, str]] = {
+    # Add combinations to exclude here
+    # ('Poland', 'II Liga'),
+    # ('Spain', 'La Liga'),
+    # ('Italy', 'Serie A'),
+}
+
+# Partial keyword matching (case-insensitive)
+# Useful for excluding leagues that might have slight variations in naming
+EXCLUDED_KEYWORDS: Set[str] = {
+    # Add keywords to exclude (partial matches)
+    # 'youth',
+    # 'u18',
+    # 'u19',
+    # 'u21',
+    # 'u23',
+    # 'reserves',
+    # 'college',
+    # 'amateur',
+}
+
+# ============================================================
 # STAKING ENGINE CONFIGURATION
 # ============================================================
 # These are now managed by the staking engine
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 3
 
-# Timing parameters - MODIFIED FOR OVER 0.5 GOALS STRATEGY
-MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Over 0.5 Goals
+# Timing parameters - MODIFIED FOR UNDER 0.5 GOALS STRATEGY
+MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Under 0.5 Goals
 SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
-AMATEUR_KEYWORDS = ['Austria','Iran','Mexico','Colombia','Argentina','amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
+# Original amateur keywords - now using EXCLUDED_KEYWORDS instead
+AMATEUR_KEYWORDS = list(EXCLUDED_KEYWORDS) if EXCLUDED_KEYWORDS else ['amateur', 'youth', 'reserves', 'u18', 'u17', 'u16', 'u19', 'u22', 'u23', 'u21', 'u20', 'college']
 
-PREDICT_START_MIN = 20  # Start checking from 20 minutes (modified from 30)
-PRE_WARM_WINDOW = (23, 27)  # Pre-warm window for 25-minute mark (modified from 34, 38)
+PREDICT_START_MIN = 20  # Start checking from 20 minutes
+PRE_WARM_WINDOW = (23, 27)  # Pre-warm window for 25-minute mark
 MEMORY_PRUNE_TIMEOUT = 5400
 
 # --- VOLATILE MEMORY CACHE MAP ---
@@ -71,6 +128,37 @@ COUNTRY_FLAGS = {
     "ecuador": "🇪🇨", "venezuela": "🇻🇪", "bolivia": "🇧🇴", "costarica": "🇨🇷",
     "finland": "🇫🇮", "world": "🌍", "turkiye": "🇹🇷"
 }
+
+# ============================================================
+# EXCLUDE FILTER FUNCTIONS
+# ============================================================
+
+def is_match_excluded(league: str, country: str, full_info: str) -> Tuple[bool, str]:
+    """
+    Check if a match should be excluded based on the configured filters.
+    
+    Returns:
+        (is_excluded, reason)
+    """
+    # 1. Check exact country exclusion
+    if country in EXCLUDED_COUNTRIES:
+        return True, f"Country excluded: {country}"
+    
+    # 2. Check exact league exclusion
+    if league in EXCLUDED_LEAGUES:
+        return True, f"League excluded: {league}"
+    
+    # 3. Check country + league combination exclusion
+    if (country, league) in EXCLUDED_COMBINATIONS:
+        return True, f"Country+League combination excluded: {country} - {league}"
+    
+    # 4. Check keyword exclusion (case-insensitive)
+    full_lower = full_info.lower()
+    for keyword in EXCLUDED_KEYWORDS:
+        if keyword.lower() in full_lower:
+            return True, f"Keyword excluded: '{keyword}' in {full_info}"
+    
+    return False, ""
 
 # =========================
 # STAKING ENGINE MANAGEMENT
@@ -169,15 +257,15 @@ def record_bet_result(is_win: bool, match_info: Optional[Dict] = None) -> Option
     return None
 
 # =========================
-# FIREBASE CONFIGURATION - OVER 0.5 GOALS SPECIFIC
+# FIREBASE CONFIGURATION - UNDER 0.5 GOALS SPECIFIC
 # =========================
 
 class FirebaseManager:
     def __init__(self, creds_json):
         self.creds_json = creds_json
         self.db = None
-        self.unresolved_collection = 'unresolved_bets_ov0.5'
-        self.resolved_collection = 'resolved_bets_ov0.5'
+        self.unresolved_collection = 'unresolved_bets_under0.5'
+        self.resolved_collection = 'resolved_bets_under0.5'
         self._connect()
 
     def _connect(self):
@@ -204,7 +292,7 @@ class FirebaseManager:
         return self._connect()
 
     def is_state_locked(self) -> bool:
-        """Check if there are any unresolved bets in the Over 0.5 collection."""
+        """Check if there are any unresolved bets in the Under 0.5 collection."""
         if not self._ensure_connection():
             return True
         try:
@@ -215,7 +303,7 @@ class FirebaseManager:
             return True
 
     def get_last_resolved_bet(self) -> dict | None:
-        """Get the last resolved bet from the Over 0.5 collection."""
+        """Get the last resolved bet from the Under 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
@@ -230,10 +318,10 @@ class FirebaseManager:
             return None
 
     def add_unresolved_bet(self, match_id: str, data: dict):
-        """Add an unresolved bet to the Over 0.5 collection."""
+        """Add an unresolved bet to the Under 0.5 collection."""
         placed_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data['placed_at'] = placed_time
-        data['collection'] = 'over_0.5_goals'  # Tag for identification
+        data['collection'] = 'under_0.5_goals'  # Tag for identification
         if not self._ensure_connection():
             logger.critical(f"❌ Transmit Blocked: Database offline. Drop ID {match_id}!")
             return
@@ -244,7 +332,7 @@ class FirebaseManager:
             logger.exception(f"❌ Critical: Failed to save unresolved bet for ID {match_id}: {e}")
 
     def get_unresolved_bet(self, match_id: str) -> dict | None:
-        """Get an unresolved bet from the Over 0.5 collection."""
+        """Get an unresolved bet from the Under 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
@@ -255,13 +343,13 @@ class FirebaseManager:
             return None
 
     def move_to_resolved(self, match_id: str, data: dict, outcome: str) -> bool:
-        """Move a bet from unresolved to resolved in the Over 0.5 collections."""
+        """Move a bet from unresolved to resolved in the Under 0.5 collections."""
         resolved_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data.update({
             'outcome': outcome,
             'resolved_at': resolved_time,
             'resolution_timestamp': firestore.SERVER_TIMESTAMP,
-            'collection': 'over_0.5_goals'
+            'collection': 'under_0.5_goals'
         })
         if not self._ensure_connection():
             return False
@@ -277,7 +365,7 @@ class FirebaseManager:
             return False
 
     def get_all_unresolved_bets(self) -> List[Dict]:
-        """Get all unresolved bets from the Over 0.5 collection."""
+        """Get all unresolved bets from the Under 0.5 collection."""
         if not self._ensure_connection():
             return []
         try:
@@ -288,7 +376,7 @@ class FirebaseManager:
             return []
 
     def get_all_resolved_bets(self, limit: int = 100) -> List[Dict]:
-        """Get resolved bets from the Over 0.5 collection."""
+        """Get resolved bets from the Under 0.5 collection."""
         if not self._ensure_connection():
             return []
         try:
@@ -301,7 +389,7 @@ class FirebaseManager:
             return []
 
     def get_statistics(self) -> Dict:
-        """Get statistics from the Over 0.5 collections."""
+        """Get statistics from the Under 0.5 collections."""
         stats = {
             'unresolved_count': 0,
             'resolved_count': 0,
@@ -333,7 +421,7 @@ class FirebaseManager:
                 stats['total_staked'] += data.get('stake', 0)
                 # Calculate profit (win returns stake * odds, but we'll track simple profit)
                 if data.get('outcome') == 'win':
-                    stats['total_profit'] += data.get('stake', 0) * 0.9  # Assuming 1.9 odds
+                    stats['total_profit'] += data.get('stake', 0) * 1.0  # Under 0.5 typically has higher odds ~1.9-2.2
                 else:
                     stats['total_profit'] -= data.get('stake', 0)
             
@@ -472,8 +560,40 @@ def extract_hybrid_geography(match) -> tuple[str, str, str]:
 
     return "Unknown League", "World", "world"
 
+# ============================================================
+# HELPER FUNCTIONS FOR FILTER CONFIGURATION
+# ============================================================
+
+def get_exclude_filters_info() -> Dict[str, Any]:
+    """
+    Get information about currently configured exclude filters.
+    Useful for debugging and status reporting.
+    """
+    return {
+        'excluded_countries': list(EXCLUDED_COUNTRIES),
+        'excluded_leagues': list(EXCLUDED_LEAGUES),
+        'excluded_combinations': list(EXCLUDED_COMBINATIONS),
+        'excluded_keywords': list(EXCLUDED_KEYWORDS),
+        'total_exclude_rules': (
+            len(EXCLUDED_COUNTRIES) + 
+            len(EXCLUDED_LEAGUES) + 
+            len(EXCLUDED_COMBINATIONS) + 
+            len(EXCLUDED_KEYWORDS)
+        )
+    }
+
+def print_exclude_filters():
+    """Print the current exclude filter configuration to the log."""
+    info = get_exclude_filters_info()
+    logger.info("📋 Current Exclude Filter Configuration:")
+    logger.info(f"   Countries excluded: {info['excluded_countries'] if info['excluded_countries'] else 'None'}")
+    logger.info(f"   Leagues excluded: {info['excluded_leagues'] if info['excluded_leagues'] else 'None'}")
+    logger.info(f"   Country+League combinations excluded: {info['excluded_combinations'] if info['excluded_combinations'] else 'None'}")
+    logger.info(f"   Keywords excluded: {info['excluded_keywords'] if info['excluded_keywords'] else 'None'}")
+    logger.info(f"   Total rules: {info['total_exclude_rules']}")
+
 # =========================
-# CORE EVALUATION PIPELINE - MODIFIED FOR OVER 0.5 GOALS
+# CORE EVALUATION PIPELINE - MODIFIED FOR UNDER 0.5 GOALS
 # =========================
 
 def process_match(match):
@@ -488,8 +608,11 @@ def process_match(match):
     league, country, country_slug = extract_hybrid_geography(match)
     full_info = f"{league} {country}"
 
-    if any(keyword.lower() in full_info.lower() for keyword in AMATEUR_KEYWORDS):
-        logger.debug(f"⏭️ Skipping amateur match: {match_name} ({full_info})")
+    # --- EXCLUDE FILTER CHECK ---
+    # Check if match should be excluded based on configured filters
+    is_excluded, exclude_reason = is_match_excluded(league, country, full_info)
+    if is_excluded:
+        logger.debug(f"⏭️ Skipping excluded match: {match_name} ({full_info}) - Reason: {exclude_reason}")
         return
 
     if hasattr(match, 'status'):
@@ -530,16 +653,17 @@ def process_match(match):
 
     LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 1: EVALUATE PLACEMENT - OVER 0.5 GOALS AT 25 MINUTES ---
+    # --- PHASE 1: EVALUATE PLACEMENT - UNDER 0.5 GOALS AT 25 MINUTES ---
     # Check if at 25 minutes, score is 0-0, and bet not placed yet
+    # For Under 0.5 Goals, we bet when score is 0-0 at 25 minutes (same as over)
     if is_first_half_phase and (live_pitch_minute == 25) and not state['bet_placed']:
         if firebase_manager.is_state_locked():
             STATE_LOCKS.inc()
-            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present in unresolved_bets_ov0.5.")
+            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present in unresolved_bets_under0.5.")
         else:
-            # For Over 0.5 Goals, we bet when score is 0-0 at 25 minutes
+            # For Under 0.5 Goals, we bet when score is 0-0 at 25 minutes
             if score == '0-0':
-                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at 25' with score {score} (Over 0.5 Goals)")
+                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at 25' with score {score} (Under 0.5 Goals)")
                 
                 # Get stake and step from staking engine
                 stake, seq = calculate_stake()
@@ -562,7 +686,7 @@ def process_match(match):
                     'score_at_bet': score,
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'over_0.5_goals',
+                    'bet_type': 'under_0.5_goals',
                     'staking_step': current_step + 1 if _staking_engine else 0,
                     'staking_sequence': STAKE_SEQUENCE if _staking_engine else [],
                 }
@@ -571,30 +695,31 @@ def process_match(match):
 
                 # Enhanced clean Telegram string notification alert layout
                 send_telegram(
-                    f"🎯 **BET PLACED - Over 0.5 Goals (Match {seq})**\n"
+                    f"🎯 **BET PLACED - Under 0.5 Goals (Match {seq})**\n"
                     f"⏱ 25' | {match_name}\n"
                     f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score} (Waiting for Over 0.5 Goals)\n"
+                    f"🔢 Score: {score} (Waiting for 0-0 at HT)\n"
                     f"💰 Stake: ${stake:.2f}{step_display}"
                 )
 
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 2: HALFTIME RESOLUTION - CHECK FOR GOALS ---
+    # --- PHASE 2: HALFTIME RESOLUTION - CHECK FOR GOALS (UNDER 0.5 GOALS WINS IF 0-0) ---
     elif status in ['HT', 'HALFTIME', 'HALF']:
         unresolved = firebase_manager.get_unresolved_bet(fid)
         if unresolved:
-            # For Over 0.5 Goals, win if there's at least 1 goal at halftime
-            # Score format is "home-away", e.g., "1-0", "1-1", etc.
+            # For Under 0.5 Goals, WIN if score is 0-0 at halftime (NO goals)
+            # LOSE if there's at least 1 goal at halftime
             try:
                 home_score, away_score = map(int, score.split('-'))
                 total_goals = home_score + away_score
-                outcome = 'win' if total_goals >= 1 else 'loss'
+                # CRITICAL CHANGE: Under 0.5 wins if total_goals == 0
+                outcome = 'win' if total_goals == 0 else 'loss'
                 goals_display = f"{total_goals} goal{'s' if total_goals != 1 else ''}"
             except (ValueError, AttributeError):
-                # If score parsing fails, check if score is not '0-0'
-                outcome = 'win' if score != '0-0' else 'loss'
+                # If score parsing fails, check if score is '0-0'
+                outcome = 'win' if score == '0-0' else 'loss'
                 goals_display = 'unknown'
 
             db_league = unresolved.get('league', league)
@@ -614,7 +739,7 @@ def process_match(match):
                     'score': score,
                     'total_goals': total_goals if 'total_goals' in locals() else 'unknown',
                     'stake': stake,
-                    'bet_type': 'over_0.5_goals'
+                    'bet_type': 'under_0.5_goals'
                 }
                 result = _staking_engine.record_result(is_win, match_info)
                 
@@ -639,15 +764,19 @@ def process_match(match):
             firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
             # Build the result message with proper stake display
+            # CRITICAL CHANGE: Under 0.5 wins if score is 0-0
             result_msg = (
-                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Over 0.5 Goals**\n"
+                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Under 0.5 Goals**\n"
                 f"⏱ 45' | {match_name}\n"
                 f"{flag_emoji} {db_country} | 🏆 {db_league}\n"
-                f"🔢 Score: {score} | {'✅ Goal scored' if outcome == 'win' else '❌ No goals'}"
+                f"🔢 Score: {score} | {'✅ 0-0 (No goals)' if outcome == 'win' else '❌ Goal(s) scored'}"
             )
             
-            if outcome == 'win' and 'total_goals' in locals():
-                result_msg += f" ({goals_display})"
+            if outcome == 'win':
+                result_msg += " - Under 0.5 Goals SUCCESSFUL!"
+            else:
+                if 'total_goals' in locals():
+                    result_msg += f" ({goals_display})"
             
             result_msg += f"\n💰 Stake: ${stake:.2f}"
             
@@ -692,9 +821,12 @@ def initialize_bot_services() -> bool:
             logger.info("📊 Staking Engine not attached. Using fixed stake.")
 
         # Log Firebase collections being used
-        logger.info(f"📁 Using Over 0.5 Goals collections:")
+        logger.info(f"📁 Using Under 0.5 Goals collections:")
         logger.info(f"   - Unresolved: {firebase_manager.unresolved_collection}")
         logger.info(f"   - Resolved: {firebase_manager.resolved_collection}")
+
+        # Log exclude filter configuration
+        print_exclude_filters()
 
         return True
     except Exception as e:
@@ -728,12 +860,12 @@ def run_bot_cycle():
         logger.error(f"Ingestion lifecycle exception: {e}")
 
 # =========================
-# ADDITIONAL UTILITY FUNCTIONS FOR OVER 0.5 GOALS
+# ADDITIONAL UTILITY FUNCTIONS FOR UNDER 0.5 GOALS
 # =========================
 
-def get_over0_5_statistics() -> Dict:
+def get_under0_5_statistics() -> Dict:
     """
-    Get statistics specifically for the Over 0.5 Goals strategy.
+    Get statistics specifically for the Under 0.5 Goals strategy.
     """
     if firebase_manager:
         return firebase_manager.get_statistics()
@@ -747,17 +879,17 @@ def get_over0_5_statistics() -> Dict:
         'total_profit': 0.0
     }
 
-def get_active_over0_5_bets() -> List[Dict]:
+def get_active_under0_5_bets() -> List[Dict]:
     """
-    Get all active (unresolved) Over 0.5 Goals bets.
+    Get all active (unresolved) Under 0.5 Goals bets.
     """
     if firebase_manager:
         return firebase_manager.get_all_unresolved_bets()
     return []
 
-def get_resolved_over0_5_bets(limit: int = 100) -> List[Dict]:
+def get_resolved_under0_5_bets(limit: int = 100) -> List[Dict]:
     """
-    Get resolved Over 0.5 Goals bets.
+    Get resolved Under 0.5 Goals bets.
     """
     if firebase_manager:
         return firebase_manager.get_all_resolved_bets(limit)
