@@ -3,8 +3,8 @@ Core business strategy processing engine.
 Evaluates live match metrics against staking parameters and logs execution telemetry.
 Hybrid version engineered to parse both object-oriented feeds and dictionary-based LiveScore payloads.
 INTEGRATED WITH:Flat Staking $10
-MODIFIED FOR: Under 0.5 Goals strategy at 25 minutes with 0-0 score
-USING: Separate Firebase collections (unresolved_bets_under0.5, resolved_bets_under0.5)
+MODIFIED FOR: Over 0.5 Goals strategy at 25 minutes with 0-0 score
+USING: Separate Firebase collections (unresolved_bets_over0.5, resolved_bets_over0.5)
 """
 
 import requests
@@ -131,8 +131,8 @@ EXCLUDED_KEYWORDS: Set[str] = {
 ORIGINAL_STAKE = 10.0
 MAX_CHASE_LEVEL = 3
 
-# Timing parameters - MODIFIED FOR UNDER 0.5 GOALS STRATEGY
-MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Under 0.5 Goals
+# Timing parameters - MODIFIED FOR OVER 0.5 GOALS STRATEGY
+MINUTES_REGULAR_BET = [25]  # Check at 25 minutes for Over 0.5 Goals
 SLEEP_TIME = 55  # Default fallback sleep time between monitoring cycles
 
 # Original amateur keywords - now using EXCLUDED_KEYWORDS instead
@@ -294,15 +294,15 @@ def record_bet_result(is_win: bool, match_info: Optional[Dict] = None) -> Option
     return None
 
 # =========================
-# FIREBASE CONFIGURATION - UNDER 0.5 GOALS SPECIFIC
+# FIREBASE CONFIGURATION - OVER 0.5 GOALS SPECIFIC
 # =========================
 
 class FirebaseManager:
     def __init__(self, creds_json):
         self.creds_json = creds_json
         self.db = None
-        self.unresolved_collection = 'unresolved_bets_under0.5'
-        self.resolved_collection = 'resolved_bets_under0.5'
+        self.unresolved_collection = 'unresolved_bets_over0.5'
+        self.resolved_collection = 'resolved_bets_over0.5'
         self._connect()
 
     def _connect(self):
@@ -329,7 +329,7 @@ class FirebaseManager:
         return self._connect()
 
     def is_state_locked(self) -> bool:
-        """Check if there are any unresolved bets in the Under 0.5 collection."""
+        """Check if there are any unresolved bets in the Over 0.5 collection."""
         if not self._ensure_connection():
             return True
         try:
@@ -340,7 +340,7 @@ class FirebaseManager:
             return True
 
     def get_last_resolved_bet(self) -> dict | None:
-        """Get the last resolved bet from the Under 0.5 collection."""
+        """Get the last resolved bet from the Over 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
@@ -355,10 +355,10 @@ class FirebaseManager:
             return None
 
     def add_unresolved_bet(self, match_id: str, data: dict):
-        """Add an unresolved bet to the Under 0.5 collection."""
+        """Add an unresolved bet to the Over 0.5 collection."""
         placed_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data['placed_at'] = placed_time
-        data['collection'] = 'under_0.5_goals'  # Tag for identification
+        data['collection'] = 'over_0.5_goals'  # Tag for identification
         if not self._ensure_connection():
             logger.critical(f"❌ Transmit Blocked: Database offline. Drop ID {match_id}!")
             return
@@ -369,7 +369,7 @@ class FirebaseManager:
             logger.exception(f"❌ Critical: Failed to save unresolved bet for ID {match_id}: {e}")
 
     def get_unresolved_bet(self, match_id: str) -> dict | None:
-        """Get an unresolved bet from the Under 0.5 collection."""
+        """Get an unresolved bet from the Over 0.5 collection."""
         if not self._ensure_connection():
             return None
         try:
@@ -380,13 +380,13 @@ class FirebaseManager:
             return None
 
     def move_to_resolved(self, match_id: str, data: dict, outcome: str) -> bool:
-        """Move a bet from unresolved to resolved in the Under 0.5 collections."""
+        """Move a bet from unresolved to resolved in the Over 0.5 collections."""
         resolved_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         data.update({
             'outcome': outcome,
             'resolved_at': resolved_time,
             'resolution_timestamp': firestore.SERVER_TIMESTAMP,
-            'collection': 'under_0.5_goals'
+            'collection': 'over_0.5_goals'
         })
         if not self._ensure_connection():
             return False
@@ -402,7 +402,7 @@ class FirebaseManager:
             return False
 
     def get_all_unresolved_bets(self) -> List[Dict]:
-        """Get all unresolved bets from the Under 0.5 collection."""
+        """Get all unresolved bets from the Over 0.5 collection."""
         if not self._ensure_connection():
             return []
         try:
@@ -413,7 +413,7 @@ class FirebaseManager:
             return []
 
     def get_all_resolved_bets(self, limit: int = 100) -> List[Dict]:
-        """Get resolved bets from the Under 0.5 collection."""
+        """Get resolved bets from the Over 0.5 collection."""
         if not self._ensure_connection():
             return []
         try:
@@ -426,7 +426,7 @@ class FirebaseManager:
             return []
 
     def get_statistics(self) -> Dict:
-        """Get statistics from the Under 0.5 collections."""
+        """Get statistics from the Over 0.5 collections."""
         stats = {
             'unresolved_count': 0,
             'resolved_count': 0,
@@ -458,7 +458,7 @@ class FirebaseManager:
                 stats['total_staked'] += data.get('stake', 0)
                 # Calculate profit (win returns stake * odds, but we'll track simple profit)
                 if data.get('outcome') == 'win':
-                    stats['total_profit'] += data.get('stake', 0) * 1.0  # Under 0.5 typically has higher odds ~1.9-2.2
+                    stats['total_profit'] += data.get('stake', 0) * 1.0  # Over 0.5 typically has lower odds ~1.1-1.3
                 else:
                     stats['total_profit'] -= data.get('stake', 0)
             
@@ -630,7 +630,7 @@ def print_exclude_filters():
     logger.info(f"   Total rules: {info['total_exclude_rules']}")
 
 # =========================
-# CORE EVALUATION PIPELINE - MODIFIED FOR UNDER 0.5 GOALS
+# CORE EVALUATION PIPELINE - MODIFIED FOR OVER 0.5 GOALS
 # =========================
 
 def process_match(match):
@@ -690,17 +690,17 @@ def process_match(match):
 
     LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 1: EVALUATE PLACEMENT - UNDER 0.5 GOALS AT 25 MINUTES ---
+    # --- PHASE 1: EVALUATE PLACEMENT - OVER 0.5 GOALS AT 25 MINUTES ---
     # Check if at 25 minutes, score is 0-0, and bet not placed yet
-    # For Under 0.5 Goals, we bet when score is 0-0 at 25 minutes (same as over)
+    # For Over 0.5 Goals, we bet when score is 0-0 at 25 minutes (same as under)
     if is_first_half_phase and (live_pitch_minute == 25) and not state['bet_placed']:
         if firebase_manager.is_state_locked():
             STATE_LOCKS.inc()
-            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present in unresolved_bets_under0.5.")
+            logger.warning(f"🚫 Qualification blocked for '{match_name}'. Active DB lock present in unresolved_bets_over0.5.")
         else:
-            # For Under 0.5 Goals, we bet when score is 0-0 at 25 minutes
+            # For Over 0.5 Goals, we bet when score is 0-0 at 25 minutes
             if score == '0-0':
-                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at 25' with score {score} (Under 0.5 Goals)")
+                logger.warning(f"⚡ QUALIFIED: Firing placement routine for {match_name} at 25' with score {score} (Over 0.5 Goals)")
                 
                 # Get stake and step from staking engine
                 stake, seq = calculate_stake()
@@ -723,7 +723,7 @@ def process_match(match):
                     'score_at_bet': score,
                     'stake': stake,
                     'match_sequence': seq,
-                    'bet_type': 'under_0.5_goals',
+                    'bet_type': 'over_0.5_goals',
                     'staking_step': current_step + 1 if _staking_engine else 0,
                     'staking_sequence': STAKE_SEQUENCE if _staking_engine else [],
                 }
@@ -732,31 +732,31 @@ def process_match(match):
 
                 # Enhanced clean Telegram string notification alert layout
                 send_telegram(
-                    f"🎯 **BET PLACED - Under 0.5 Goals (Match {seq})**\n"
+                    f"🎯 **BET PLACED - Over 0.5 Goals (Match {seq})**\n"
                     f"⏱ 25' | {match_name}\n"
                     f"{flag_emoji} {country} | 🏆 {league}\n"
-                    f"🔢 Score: {score} (Waiting for 0-0 at HT)\n"
+                    f"🔢 Score: {score} (Waiting for any goal)\n"
                     f"💰 Stake: ${stake:.2f}{step_display}"
                 )
 
         state['bet_placed'] = True
         LOCAL_TRACKED_MATCHES[fid] = state
 
-    # --- PHASE 2: HALFTIME RESOLUTION - CHECK FOR GOALS (UNDER 0.5 GOALS WINS IF 0-0) ---
+    # --- PHASE 2: HALFTIME RESOLUTION - CHECK FOR GOALS (OVER 0.5 GOALS WINS IF ANY GOAL) ---
     elif status in ['HT', 'HALFTIME', 'HALF']:
         unresolved = firebase_manager.get_unresolved_bet(fid)
         if unresolved:
-            # For Under 0.5 Goals, WIN if score is 0-0 at halftime (NO goals)
-            # LOSE if there's at least 1 goal at halftime
+            # For Over 0.5 Goals, WIN if at least 1 goal at halftime
+            # LOSE if score is still 0-0 at halftime
             try:
                 home_score, away_score = map(int, score.split('-'))
                 total_goals = home_score + away_score
-                # CRITICAL CHANGE: Under 0.5 wins if total_goals == 0
-                outcome = 'win' if total_goals == 0 else 'loss'
+                # CRITICAL CHANGE: Over 0.5 wins if total_goals >= 1
+                outcome = 'win' if total_goals >= 1 else 'loss'
                 goals_display = f"{total_goals} goal{'s' if total_goals != 1 else ''}"
             except (ValueError, AttributeError):
                 # If score parsing fails, check if score is '0-0'
-                outcome = 'win' if score == '0-0' else 'loss'
+                outcome = 'loss' if score == '0-0' else 'win'
                 goals_display = 'unknown'
 
             db_league = unresolved.get('league', league)
@@ -776,7 +776,7 @@ def process_match(match):
                     'score': score,
                     'total_goals': total_goals if 'total_goals' in locals() else 'unknown',
                     'stake': stake,
-                    'bet_type': 'under_0.5_goals'
+                    'bet_type': 'over_0.5_goals'
                 }
                 result = _staking_engine.record_result(is_win, match_info)
                 
@@ -801,19 +801,20 @@ def process_match(match):
             firebase_manager.move_to_resolved(fid, unresolved, outcome)
 
             # Build the result message with proper stake display
-            # CRITICAL CHANGE: Under 0.5 wins if score is 0-0
+            # CRITICAL CHANGE: Over 0.5 wins if at least 1 goal
             result_msg = (
-                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Under 0.5 Goals**\n"
+                f"{'✅ WIN' if outcome == 'win' else '❌ LOSS'} **HT Settlement - Over 0.5 Goals**\n"
                 f"⏱ 45' | {match_name}\n"
                 f"{flag_emoji} {db_country} | 🏆 {db_league}\n"
-                f"🔢 Score: {score} | {'✅ 0-0 (No goals)' if outcome == 'win' else '❌ Goal(s) scored'}"
+                f"🔢 Score: {score} | {'✅ Goal(s) scored!' if outcome == 'win' else '❌ 0-0 (No goals)'}"
             )
             
             if outcome == 'win':
-                result_msg += " - Under 0.5 Goals SUCCESSFUL!"
-            else:
                 if 'total_goals' in locals():
                     result_msg += f" ({goals_display})"
+                result_msg += " - Over 0.5 Goals SUCCESSFUL!"
+            else:
+                result_msg += " - Over 0.5 Goals FAILED"
             
             result_msg += f"\n💰 Stake: ${stake:.2f}"
             
@@ -858,7 +859,7 @@ def initialize_bot_services() -> bool:
             logger.info("📊 Staking Engine not attached. Using fixed stake.")
 
         # Log Firebase collections being used
-        logger.info(f"📁 Using Under 0.5 Goals collections:")
+        logger.info(f"📁 Using Over 0.5 Goals collections:")
         logger.info(f"   - Unresolved: {firebase_manager.unresolved_collection}")
         logger.info(f"   - Resolved: {firebase_manager.resolved_collection}")
 
@@ -897,12 +898,12 @@ def run_bot_cycle():
         logger.error(f"Ingestion lifecycle exception: {e}")
 
 # =========================
-# ADDITIONAL UTILITY FUNCTIONS FOR UNDER 0.5 GOALS
+# ADDITIONAL UTILITY FUNCTIONS FOR OVER 0.5 GOALS
 # =========================
 
-def get_under0_5_statistics() -> Dict:
+def get_over0_5_statistics() -> Dict:
     """
-    Get statistics specifically for the Under 0.5 Goals strategy.
+    Get statistics specifically for the Over 0.5 Goals strategy.
     """
     if firebase_manager:
         return firebase_manager.get_statistics()
@@ -916,17 +917,17 @@ def get_under0_5_statistics() -> Dict:
         'total_profit': 0.0
     }
 
-def get_active_under0_5_bets() -> List[Dict]:
+def get_active_over0_5_bets() -> List[Dict]:
     """
-    Get all active (unresolved) Under 0.5 Goals bets.
+    Get all active (unresolved) Over 0.5 Goals bets.
     """
     if firebase_manager:
         return firebase_manager.get_all_unresolved_bets()
     return []
 
-def get_resolved_under0_5_bets(limit: int = 100) -> List[Dict]:
+def get_resolved_over0_5_bets(limit: int = 100) -> List[Dict]:
     """
-    Get resolved Under 0.5 Goals bets.
+    Get resolved Over 0.5 Goals bets.
     """
     if firebase_manager:
         return firebase_manager.get_all_resolved_bets(limit)
