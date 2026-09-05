@@ -1,0 +1,17 @@
+steps:
+  # 1. Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/lsb36:$COMMIT_SHA', '.']
+
+  # 2. Push the container image to Container/Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/lsb36:$COMMIT_SHA']
+
+  # 3. Deploy to Cloud Run (or Cloud Run Job / Compute Engine depending on workload)
+  # Example for Cloud Run Job (suitable for batch/script tasks) or Service (listening on port):
+  # - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  #   entrypoint: gcloud
+  #   args: ['run', 'deploy', 'lsb-bot', '--image', 'gcr.io/$PROJECT_ID/lsb36:$COMMIT_SHA', '--region', 'us-central1']
+
+images:
+  - 'gcr.io/$PROJECT_ID/lsb36:$COMMIT_SHA'
